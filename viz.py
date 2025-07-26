@@ -13,9 +13,15 @@ def plot_position_dist(generated_samples, gmm_params, ax):
     ax.hist(generated_samples, bins=60, density=True, alpha=0.75, label='Generated Samples')
     ax.set_title('Final Position Distribution'); ax.set_xlabel('Position x'); ax.set_ylabel('Density'); ax.legend()
 
-def plot_aux_dist(ax, *args):
+def plot_aux_dist(ax, *args, target_dist=None):
     """Plots one or more auxiliary distributions (e.g., momentum) on the same axes."""
     colors = plt.cm.viridis(np.linspace(0, 0.8, len(args)))
     for i, (data, label) in enumerate(args):
         ax.hist(data, bins=60, density=True, alpha=0.6, label=f'Final {label}', color=colors[i])
+    if target_dist is not None:
+        mean, std = target_dist
+        x_min, x_max = ax.get_xlim()
+        x_range = np.linspace(x_min, x_max, 200)
+        pdf = (1 / (std * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x_range - mean) / std)**2)
+        ax.plot(x_range, pdf, 'r--', lw=2, label='Target PDF')
     ax.set_title(f'Final Auxiliary Distribution(s)'); ax.set_xlabel('Value'); ax.set_ylabel('Density'); ax.legend()
