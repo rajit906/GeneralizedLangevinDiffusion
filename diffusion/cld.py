@@ -13,9 +13,9 @@ class CriticallyDampedLangevin(DiffusionModel):
         self.Gamma = 1.0
         self.beta = 4.0
         self.gamma_init = 0.04
-        s_init_var = self.gamma_init * self.M
+        v_init_var = self.gamma_init * self.M
         super().__init__('Critically Damped Langevin', gmm_params, **kwargs)
-        self.s_init_var = s_init_var
+        self.v_init_var = v_init_var
         self.precompute()
 
     def precompute(self):
@@ -50,7 +50,7 @@ class CriticallyDampedLangevin(DiffusionModel):
 
         for m, s in zip(self.gmm_params['means'], self.gmm_params['stds']):
             mu0_k = torch.tensor([m, 0.], device=DEVICE)
-            Sigma0_k = torch.diag(torch.tensor([s**2, self.s_init_var], device=DEVICE))
+            Sigma0_k = torch.diag(torch.tensor([s**2, self.v_init_var], device=DEVICE))
             mean_t = M_t @ mu0_k
             cov_t = M_t @ Sigma0_k @ M_t.T + Sigma_t_added
             means_t.append(mean_t); covs_t.append(cov_t)
@@ -109,7 +109,7 @@ class CriticallyDampedLangevin(DiffusionModel):
     def run_demonstration(self, n_plot, n_hist):
         print(f"Running demonstration for {self.name}...")
         x0_plot = self._get_initial_samples(n_plot)
-        z0_plot = torch.stack([x0_plot, torch.randn(n_plot, device=DEVICE) * np.sqrt(self.s_init_var)], dim=1)
+        z0_plot = torch.stack([x0_plot, torch.randn(n_plot, device=DEVICE) * np.sqrt(self.v_init_var)], dim=1)
         xT_hist = torch.randn(n_hist, device=DEVICE)
         vT_hist = torch.randn(n_hist, device=DEVICE) * np.sqrt(self.M)
         zT_hist = torch.stack([xT_hist, vT_hist], dim=1)
