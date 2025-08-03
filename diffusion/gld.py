@@ -170,29 +170,36 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         
         batch_size = z.shape[0]
         
-        # Tensors to store results for each component
-        log_component_probs = torch.zeros(batch_size, len(weights), device=DEVICE)
-        component_scores = torch.zeros(batch_size, len(weights), 3, device=DEVICE)
+        # Tensors to accumulate the numerator and denominator of the score formula
+        total_pdf = torch.zeros(batch_size, device=DEVICE)
+        score_numerator = torch.zeros(batch_size, 3, device=DEVICE)
 
         # Loop through each GMM component
-        for k, (mu_k, Sigma_k) in enumerate(zip(means_k, covs_k)):
-            # Add a small epsilon to the diagonal for numerical stability
-            stable_Sigma_k = Sigma_k + 1e-6 * torch.eye(3, device=DEVICE)
-            dist_3d = torch.distributions.MultivariateNormal(mu_k, stable_Sigma_k)
-            log_prob_3d = dist_3d.log_prob(z)
-            score_k = -torch.linalg.solve(stable_Sigma_k, (z - mu_k).T).T
-            log_component_probs[:, k] = log_prob_3d
-            component_scores[:, k, :] = score_k
+        for w, mu_k, Sigma_k in zip(weights, means_k, covs_k):
+            try:
+                # Add a small epsilon to the diagonal for numerical stability
+                stable_Sigma_k = Sigma_k + 1e-6 * torch.eye(3, device=DEVICE)
+                dist_3d = torch.distributions.MultivariateNormal(mu_k, stable_Sigma_k)
+                
+                # Calculate the PDF of z under the k-th 3D Gaussian component
+                pdf_k = torch.exp(dist_3d.log_prob(z))
+                
+                # Calculate the score of the k-th 3D Gaussian component
+                score_k = -torch.linalg.solve(stable_Sigma_k, (z - mu_k).T).T
 
-        # Calculate responsibilities using log-sum-exp for stability
-        log_weights = torch.tensor(weights, device=DEVICE).log()
-        log_weighted_probs = log_component_probs + log_weights.unsqueeze(0)
-        log_total_prob = torch.logsumexp(log_weighted_probs, dim=1, keepdim=True)
-        log_responsibilities = log_weighted_probs - log_total_prob
-        responsibilities = log_responsibilities.exp()
+                # Accumulate the total PDF (denominator)
+                total_pdf += w * pdf_k
+                
+                # Accumulate the numerator: sum(w_k * p_k(z) * score_k(z))
+                score_numerator += (w * pdf_k).unsqueeze(1) * score_k
 
-        # Calculate the final marginal score as the weighted average of component scores
-        final_score_3d = torch.sum(responsibilities.unsqueeze(2) * component_scores, dim=1)
+            except torch.linalg.LinAlgError:
+                # This block can be hit if the covariance matrix is singular even with jitter.
+                # In this case, the component's contribution to the score is zero.
+                continue
+
+        # Calculate the final marginal score: numerator / denominator
+        final_score_3d = score_numerator / (total_pdf.unsqueeze(1) + 1e-8)
         
         # Return only the scores for p and s, as needed by the reverse SDE
         return final_score_3d[:, 1:]
