@@ -9,7 +9,7 @@ class DiffusionModel(ABC):
         self.gmm_params = {k: torch.tensor(v, device=DEVICE, dtype=torch.float32) for k, v in gmm_params.items()}
         self.T = T
         self.n_steps = n_steps
-        self.ts = torch.linspace(0, T, n_steps, device=DEVICE)
+        self.ts = torch.linspace(1e-4, T, n_steps, device=DEVICE)
         self.dt = torch.tensor(T / n_steps, device=DEVICE, dtype=torch.float32)
         print(f"--- Initializing {self.name} ---")
 

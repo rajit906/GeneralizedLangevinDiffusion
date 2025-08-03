@@ -1,6 +1,36 @@
 import numpy as np
 from scipy.linalg import expm
 from scipy.integrate import quad
+from scipy.integrate import solve_ivp
+
+def compute_covariance_ode(t, beta, A, G, Sigma_0):
+    """
+    Computes Sigma(t) by solving the Lyapunov differential equation.
+    This is often more numerically stable.
+    """
+    F = -beta * A
+    Q = G @ G.T
+
+    # The ODE function needs a flattened state vector
+    def lyapunov_ode(t, sigma_flat):
+        Sigma = sigma_flat.reshape(3, 3)
+        dSigma_dt = F @ Sigma + Sigma @ F.T + Q
+        return dSigma_dt.flatten()
+
+    # Initial condition must also be flat
+    sigma0_flat = Sigma_0.flatten()
+    
+    # Solve the ODE from t=0 to the target time
+    sol = solve_ivp(
+        lyapunov_ode, 
+        [0, t], 
+        sigma0_flat, 
+        t_eval=[t] # Only get the result at the final time t
+    )
+    
+    # The result is in sol.y, take the last time point and reshape
+    Sigma_t = sol.y[:, -1].reshape(3, 3)
+    return Sigma_t
 
 def compute_mean_and_covariance(t, beta, A, G, mu_0, Sigma_0):
     """
@@ -22,33 +52,21 @@ def compute_mean_and_covariance(t, beta, A, G, mu_0, Sigma_0):
     # Define the core drift and diffusion matrices
     F = -beta * A
     Q = G @ G.T
-    
-    # --- 1. Compute the Mean ---
     M_t = expm(F * t)
     mu_t = M_t @ mu_0
-    
-    # --- 2. Compute the Covariance ---
-    # Propagated term
     propagated_term = M_t @ Sigma_0 @ M_t.T
-    
-    # Integral term using the corrected formula
     def integrand(s):
         M_s = expm(F * s)
         return M_s @ Q @ M_s.T
-
-    # Numerically integrate each element of the matrix from 0 to t
     integral_term = np.zeros((3, 3))
     for i in range(3):
         for j in range(3):
             element_integrand = lambda s: integrand(s)[i, j]
-            result, _ = quad(element_integrand, 0, t, epsabs=1e-8, epsrel=1e-8)
+            result, _ = quad(element_integrand, 0, t, epsabs=1e-6, epsrel=1e-6)
             integral_term[i, j] = result
-            
     Sigma_t = propagated_term + integral_term
-    
     return mu_t, Sigma_t
 
-# --- Analytical Test Case ---
 if __name__ == '__main__':
     print("--- Analytical Test: A Nilpotent System ---")
     
