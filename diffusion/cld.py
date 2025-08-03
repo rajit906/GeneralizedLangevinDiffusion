@@ -61,9 +61,11 @@ class CriticallyDampedLangevin(DiffusionModel):
         p_t_z = torch.zeros(z.shape[0], device=DEVICE)
         grad_v_p_t_z = torch.zeros(z.shape[0], device=DEVICE)
         for w, mean, cov in zip(weights, means, covs):
-            dist = torch.distributions.MultivariateNormal(mean, cov)
+            # Add jitter for stability
+            stable_cov = cov + 1e-6 * torch.eye(2, device=DEVICE)
+            dist = torch.distributions.MultivariateNormal(mean, stable_cov)
             pdf = torch.exp(dist.log_prob(z))
-            grad_log_pdf = -torch.linalg.solve(cov, (z - mean).T).T
+            grad_log_pdf = -torch.linalg.solve(stable_cov, (z - mean).T).T
             p_t_z += w * pdf
             grad_v_p_t_z += w * pdf * grad_log_pdf[:, 1]
         return grad_v_p_t_z / (p_t_z + 1e-8)
@@ -80,6 +82,43 @@ class CriticallyDampedLangevin(DiffusionModel):
         return zs
 
     def solve_reverse_sde(self, zT):
+        """
+        Solves the reverse SDE using the Euler-Maruyama method.
+        """
+        print(f"Solving reverse SDE for {self.name} with Euler-Maruyama...")
+        zs = torch.zeros(zT.shape[0], self.n_steps, 2, device=DEVICE)
+        zs[:, -1, :] = zT
+        M_inv = 1.0 / self.M
+        sqrt_dt = torch.sqrt(self.dt)
+
+        for i in range(self.n_steps - 1, -1, -1):
+            z = zs[:, i, :]
+            x, v = z[:, 0], z[:, 1]
+            
+            score_v = self._score_fn(z, i)
+            
+            # Reverse drift for x: -f_x = -beta * M_inv * v
+            # Reverse drift for v: -f_v + GGt*S' = (beta*x + beta*Gamma*M_inv*v) + (2*Gamma*beta*score_v)
+            drift_x = -self.beta * M_inv * v
+            drift_v = self.beta * x + self.beta * self.Gamma * M_inv * v + 2 * self.Gamma * self.beta * score_v
+            
+            # Noise term
+            dW = torch.randn_like(v) * sqrt_dt
+            noise_v = np.sqrt(2 * self.Gamma * self.beta) * dW
+
+            # Backward step: z_{t-dt} = z_t - f_rev*dt + G*dW_bar
+            # Note: f_rev = -f_fwd + GGt*S'
+            if i > 0:
+                zs[:, i-1, 0] = x - drift_x * self.dt
+                zs[:, i-1, 1] = v - drift_v * self.dt + noise_v
+
+        return zs
+
+    def solve_reverse_sde_sscs(self, zT):
+        """
+        Solves the reverse SDE using the Symmetric Splitting (SSCS) method.
+        """
+        print(f"Solving reverse SDE for {self.name} with SSCS...")
         zs = torch.zeros(zT.shape[0], self.n_steps, 2, device=DEVICE); zs[:, -1, :] = zT
         M_inv = 1.0 / self.M
         B_half_dt = self.beta * (self.dt.item() / 2)
@@ -121,5 +160,5 @@ class CriticallyDampedLangevin(DiffusionModel):
         plot_position_dist(reverse_paths[:, 0, 0], self.gmm_params, axes[0, 2])
         axes[1, 0].plot(self.ts.cpu(), forward_paths[:, :, 1].T, lw=1.5); axes[1, 0].set_title('Forward: Momentum'); axes[1, 0].set_xlabel('Time'); axes[1, 0].set_ylabel('Momentum')
         axes[1, 1].plot(self.ts.cpu(), reverse_paths[:n_plot, :, 1].T, lw=1.5); axes[1, 1].set_title('Reverse: Momentum'); axes[1, 1].set_xlabel('Time')
-        plot_aux_dist(axes[1, 2], (reverse_paths[:, 0, 1], 'Momentum'))
+        plot_aux_dist(axes[1, 2], (reverse_paths[:, 0, 1], 'Momentum'), target_dist=(0, np.sqrt(self.v_init_var)))
         plt.tight_layout(rect=[0, 0, 1, 0.96]); plt.show()

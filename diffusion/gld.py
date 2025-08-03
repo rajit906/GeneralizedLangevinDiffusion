@@ -23,13 +23,13 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         # --- Model Parameters ---
         self.beta = 4.0
         self.gamma = 1.0
-        self.lambda_val = 1.0 # Using lambda_val to avoid keyword conflict
+        self.lambda_val = 0. # Using lambda_val to avoid keyword conflict
         self.c = 0.5
         self.M = 0.25
         self.M_inv = 1.0 / self.M
 
         # Variances for initial momentum and auxiliary variables
-        self.p_init_var = 0.01
+        self.p_init_var = self.gamma * self.M
         self.s_init_var = 0.01
 
         # --- SDE Matrices (consistent with LaTeX notation) ---
@@ -176,33 +176,21 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
 
         # Loop through each GMM component
         for w, mu_k, Sigma_k in zip(weights, means_k, covs_k):
-            try:
                 # Add a small epsilon to the diagonal for numerical stability
-                stable_Sigma_k = Sigma_k + 1e-6 * torch.eye(3, device=DEVICE)
+                stable_Sigma_k = Sigma_k #+ 1e-6 * torch.eye(3, device=DEVICE)
                 dist_3d = torch.distributions.MultivariateNormal(mu_k, stable_Sigma_k)
-                
                 # Calculate the PDF of z under the k-th 3D Gaussian component
                 pdf_k = torch.exp(dist_3d.log_prob(z))
-                
                 # Calculate the score of the k-th 3D Gaussian component
                 score_k = -torch.linalg.solve(stable_Sigma_k, (z - mu_k).T).T
-
                 # Accumulate the total PDF (denominator)
-                total_pdf += w * pdf_k
-                
+                total_pdf += w * pdf_k  
                 # Accumulate the numerator: sum(w_k * p_k(z) * score_k(z))
                 score_numerator += (w * pdf_k).unsqueeze(1) * score_k
-
-            except torch.linalg.LinAlgError:
-                # This block can be hit if the covariance matrix is singular even with jitter.
-                # In this case, the component's contribution to the score is zero.
-                continue
-
         # Calculate the final marginal score: numerator / denominator
         final_score_3d = score_numerator / (total_pdf.unsqueeze(1) + 1e-8)
-        
         # Return only the scores for p and s, as needed by the reverse SDE
-        return final_score_3d[:, 1:]
+        return final_score_3d
 
 
     def solve_reverse_sde(self, zT):
@@ -213,35 +201,17 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         
         zs = torch.zeros((zT.shape[0], self.n_steps, 3), device=DEVICE)
         zs[:, -1, :] = zT # Start from time T
-        
         sqrt_dt = torch.sqrt(self.dt)
-
-        # Iterate backwards from T to 0
         for i in range(self.n_steps - 1, -1, -1):
             z = zs[:, i, :]
-            
-            # 1. Get the score for p and s
-            score_ps = self._score_fn(z, i) #torch.zeros_like(z)[:, 1:]
-            #score_ps = torch.clamp(score_ps, min=-100.0, max=100.0)
-            
-            # 2. Construct the modified score vector S' = [0, score_p, score_s]
-            score_full = torch.zeros_like(z)
-            score_full[:, 1:] = score_ps
-            
-            # 3. Calculate the reverse drift: f_rev = -f_fwd + G*G^T*S'
+            score_full = self._score_fn(z, i)
             f_fwd = -self.beta * (self.A @ z.T).T
             score_drift = (self.GGt @ score_full.T).T
             drift_rev = -f_fwd + score_drift
-            
-            # 4. Calculate the diffusion term
             dW = torch.randn_like(z) * sqrt_dt
             diffusion = (self.G @ dW.T).T
-            
-            # 5. Euler-Maruyama step (going backward in time)
-            # z_{t-dt} = z_t - f_rev * dt + G * dW_bar
             if i > 0:
                 zs[:, i - 1, :] = z - drift_rev * self.dt + diffusion
-            
         return zs
         
     def run_demonstration(self, n_plot, n_hist):
@@ -282,8 +252,8 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
             axes[i, 0].set_title(f'Forward: {var_names[i]}')
             axes[i, 0].set_ylabel(var_names[i])
             
-            # Plot reverse paths
-            axes[i, 1].plot(ts_cpu, reverse_paths[:, :, i].T, lw=1.5, alpha=0.6)
+            # Plot reverse paths (with the fix to only plot n_plot traces)
+            axes[i, 1].plot(ts_cpu, reverse_paths[:n_plot, :, i].T, lw=1.5, alpha=0.6)
             axes[i, 1].set_title(f'Reverse: {var_names[i]}')
             
             if i == 2:
