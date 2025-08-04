@@ -177,7 +177,7 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         # Loop through each GMM component
         for w, mu_k, Sigma_k in zip(weights, means_k, covs_k):
                 # Add a small epsilon to the diagonal for numerical stability
-                stable_Sigma_k = Sigma_k #+ 1e-6 * torch.eye(3, device=DEVICE)
+                stable_Sigma_k = Sigma_k + 1e-6 * torch.eye(3, device=DEVICE)
                 dist_3d = torch.distributions.MultivariateNormal(mu_k, stable_Sigma_k)
                 # Calculate the PDF of z under the k-th 3D Gaussian component
                 pdf_k = torch.exp(dist_3d.log_prob(z))

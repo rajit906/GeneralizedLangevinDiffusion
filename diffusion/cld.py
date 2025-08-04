@@ -16,6 +16,23 @@ class CriticallyDampedLangevin(DiffusionModel):
         v_init_var = self.gamma_init * self.M
         super().__init__('Critically Damped Langevin', gmm_params, **kwargs)
         self.v_init_var = v_init_var
+
+        # --- SDE Matrices ---
+        M_inv = 1.0 / self.M
+        # Forward SDE is dz = f_fwd(z)dt + G*dW, where f_fwd = -beta*A*z
+        self.A = torch.tensor([
+            [0, -M_inv],
+            [1, self.Gamma * M_inv]
+        ], dtype=torch.float32, device=DEVICE)
+
+        # Noise is only applied to the velocity component
+        self.G = torch.tensor([
+            [0, 0],
+            [0, np.sqrt(2 * self.Gamma * self.beta)]
+        ], dtype=torch.float32, device=DEVICE)
+        
+        self.GGt = self.G @ self.G.T
+        
         self.precompute()
 
     def precompute(self):
@@ -68,81 +85,47 @@ class CriticallyDampedLangevin(DiffusionModel):
             grad_log_pdf = -torch.linalg.solve(stable_cov, (z - mean).T).T
             p_t_z += w * pdf
             grad_v_p_t_z += w * pdf * grad_log_pdf[:, 1]
-        return grad_v_p_t_z / (p_t_z + 1e-8)
+            score_full = torch.zeros_like(z)
+            score_full[:, 1] = grad_v_p_t_z / (p_t_z + 1e-8)
+        return score_full
 
     def solve_forward_sde(self, z0):
-        zs = torch.zeros(z0.shape[0], self.n_steps, 2, device=DEVICE); zs[:, 0, :] = z0
-        M_inv = 1.0 / self.M
+        """Solves the forward SDE using matrix operations."""
+        print(f"Solving forward SDE for {self.name}...")
+        zs = torch.zeros(z0.shape[0], self.n_steps, 2, device=DEVICE)
+        zs[:, 0, :] = z0
+        sqrt_dt = torch.sqrt(self.dt)
+
         for i in range(self.n_steps - 1):
-            x, v = zs[:, i, 0], zs[:, i, 1]
-            dx = (self.beta * M_inv) * v * self.dt
-            dv = (-self.beta * x - self.beta * self.Gamma * M_inv * v) * self.dt + \
-                 np.sqrt(2 * self.Gamma * self.beta) * torch.randn_like(v) * torch.sqrt(self.dt)
-            zs[:, i+1, 0] = x + dx; zs[:, i+1, 1] = v + dv
+            z = zs[:, i, :]
+            dW = torch.randn_like(z) * sqrt_dt
+            drift = -self.beta * (self.A @ z.T).T
+            diffusion = (self.G @ dW.T).T
+            dz = drift * self.dt + diffusion
+            zs[:, i+1, :] = z + dz
         return zs
 
     def solve_reverse_sde(self, zT):
         """
-        Solves the reverse SDE using the Euler-Maruyama method.
+        Solves the reverse SDE using the Euler-Maruyama method with matrix operations.
         """
         print(f"Solving reverse SDE for {self.name} with Euler-Maruyama...")
         zs = torch.zeros(zT.shape[0], self.n_steps, 2, device=DEVICE)
         zs[:, -1, :] = zT
-        M_inv = 1.0 / self.M
         sqrt_dt = torch.sqrt(self.dt)
-
         for i in range(self.n_steps - 1, -1, -1):
             z = zs[:, i, :]
-            x, v = z[:, 0], z[:, 1]
-            
-            score_v = self._score_fn(z, i)
-            
-            # Reverse drift for x: -f_x = -beta * M_inv * v
-            # Reverse drift for v: -f_v + GGt*S' = (beta*x + beta*Gamma*M_inv*v) + (2*Gamma*beta*score_v)
-            drift_x = -self.beta * M_inv * v
-            drift_v = self.beta * x + self.beta * self.Gamma * M_inv * v + 2 * self.Gamma * self.beta * score_v
-            
-            # Noise term
-            dW = torch.randn_like(v) * sqrt_dt
-            noise_v = np.sqrt(2 * self.Gamma * self.beta) * dW
-
-            # Backward step: z_{t-dt} = z_t - f_rev*dt + G*dW_bar
-            # Note: f_rev = -f_fwd + GGt*S'
+            score_full = self._score_fn(z, i)
+            # Calculate reverse drift: f_rev = -f_fwd + GGt*S'
+            f_fwd = -self.beta * (self.A @ z.T).T
+            score_drift = (self.GGt @ score_full.T).T
+            drift_rev = -f_fwd + score_drift
+            # Calculate diffusion term
+            dW = torch.randn_like(z) * sqrt_dt
+            diffusion = (self.G @ dW.T).T
+            # Backward step
             if i > 0:
-                zs[:, i-1, 0] = x - drift_x * self.dt
-                zs[:, i-1, 1] = v - drift_v * self.dt + noise_v
-
-        return zs
-
-    def solve_reverse_sde_sscs(self, zT):
-        """
-        Solves the reverse SDE using the Symmetric Splitting (SSCS) method.
-        """
-        print(f"Solving reverse SDE for {self.name} with SSCS...")
-        zs = torch.zeros(zT.shape[0], self.n_steps, 2, device=DEVICE); zs[:, -1, :] = zT
-        M_inv = 1.0 / self.M
-        B_half_dt = self.beta * (self.dt.item() / 2)
-        exp_term = np.exp(-2 * B_half_dt / self.Gamma)
-        exp_full_dt = np.exp(4 * B_half_dt / self.Gamma)
-        cov_xx = exp_full_dt - 1 - 4*B_half_dt/self.Gamma - 8*B_half_dt**2/self.Gamma**2
-        cov_xv = -4 * B_half_dt**2 / self.Gamma
-        cov_vv = self.Gamma**2/4*(exp_full_dt-1) + B_half_dt*self.Gamma - 2*B_half_dt**2
-        cov_half_np = np.array([[cov_xx, cov_xv], [cov_xv, cov_vv]]) * np.exp(-4*B_half_dt/self.Gamma)
-        cov_half = torch.from_numpy(cov_half_np).float().to(DEVICE)
-
-        for i in range(self.n_steps - 1, 0, -1):
-            u_n = zs[:, i, :]
-            mu_x_half = (2*B_half_dt/self.Gamma*u_n[:,0]-4*B_half_dt/self.Gamma**2*u_n[:,1]+u_n[:,0])*exp_term
-            mu_v_half = (B_half_dt*u_n[:,0]-2*B_half_dt/self.Gamma*u_n[:,1]+u_n[:,1])*exp_term
-            mu_half = torch.stack([mu_x_half, mu_v_half], dim=1)
-            u_half = torch.distributions.MultivariateNormal(mu_half, cov_half).sample()
-            score_v = self._score_fn(u_half, i)
-            v_update = self.dt * (2 * self.beta * self.Gamma * (score_v + M_inv * u_half[:,1]))
-            u_half_prime = u_half.clone(); u_half_prime[:, 1] += v_update
-            mu_x_full = (2*B_half_dt/self.Gamma*u_half_prime[:,0]-4*B_half_dt/self.Gamma**2*u_half_prime[:,1]+u_half_prime[:,0])*exp_term
-            mu_v_full = (B_half_dt*u_half_prime[:,0]-2*B_half_dt/self.Gamma*u_half_prime[:,1]+u_half_prime[:,1])*exp_term
-            mu_full = torch.stack([mu_x_full, mu_v_full], dim=1)
-            zs[:, i-1, :] = torch.distributions.MultivariateNormal(mu_full, cov_half).sample()
+                zs[:, i-1, :] = z - drift_rev * self.dt + diffusion
         return zs
 
     def run_demonstration(self, n_plot, n_hist):
