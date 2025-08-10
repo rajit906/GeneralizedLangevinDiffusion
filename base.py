@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 import torch
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cpu")
 
 class DiffusionModel(ABC):
     """Abstract base class for diffusion models using PyTorch."""
