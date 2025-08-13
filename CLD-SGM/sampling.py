@@ -88,6 +88,15 @@ def get_ode_sampler(config, sde, sampling_shape, eps):
 
     return ode_sampler
 
+def gDDIM():
+    raise NotImplementedError
+
+def sgDDIM():
+    raise NotImplementedError
+
+def odeSplitting():
+    raise NotImplementedError
+
 
 def get_em_sampler(config, sde, sampling_shape, eps):
     ''' 
@@ -255,3 +264,243 @@ def get_sscs_sampler(config, sde, sampling_shape, eps):
             return x, v, config.n_discrete_steps
 
     return sscs_sampler
+
+def get_abo_sampler(config, sde, sampling_shape, eps):
+    ''' 
+    Sampling from the ReverseSDE using our ABO. Only applicable to CLD-SGM.
+    TODO: Add string to do integration.
+    '''
+
+    gc.collect()
+
+    n_discrete_steps = config.n_discrete_steps if not config.denoising else config.n_discrete_steps - 1
+    t_final = 1. - eps
+    t = torch.linspace(0., t_final, n_discrete_steps + 1, dtype=torch.float64)
+    if config.striding == 'linear':
+        pass
+    elif config.striding == 'quadratic':
+        t = t_final * torch.flip(1 - (t / t_final) ** 2., dims=[0])
+
+    beta_fn = sde.beta_fn
+    beta_int_fn = sde.beta_int_fn
+    num_stab = config.sscs_num_stab
+
+    def denoising_fn(model, u, t):
+        score_fn = get_score_fn(config, sde, model, train=False)
+        discrete_step_fn = sde.get_discrete_step_fn(
+            mode='reverse', score_fn=score_fn)
+        u, u_mean = discrete_step_fn(u, t, eps)
+        return u_mean
+
+    def compute_mean_of_analytical_dynamics(u, t, dt):
+        B = (beta_int_fn(1. - (t + dt)) - beta_int_fn(1. - t))
+
+        x, v = torch.chunk(u, 2, dim=1)
+        coeff = torch.exp(2. * sde.g * B)
+
+        mean_x = coeff * ((1. - 2. * sde.g * B) * x + 4. * sde.g ** 2. * B * v)
+        mean_v = coeff * (-B * x + (1. + 2. * sde.g * B) * v)
+        return torch.cat((mean_x, mean_v), dim=1)
+
+    def compute_variance_of_analytical_dynamics(t, dt):
+        B = beta_int_fn(1. - (t + dt)) - beta_int_fn(1. - t)
+        coeff = torch.exp(4. * sde.g * B)
+        var_xx = coeff * (1. / coeff - 1. + 4. * sde.g *
+                          B - 8. * sde.g**2 * B ** 2.)
+        var_xv = -coeff * (4. * sde.g * B ** 2.)
+        var_vv = coeff * (-sde.f ** 2. * (-(1. / coeff) +
+                          1.) / 4. - sde.f * B - 2. * B ** 2.)
+
+        return [var_xx + num_stab, var_xv, var_vv + num_stab]
+
+    def analytical_dynamics(u, t, dt, half_step):
+        if half_step:
+            dt_hd = dt / 2.
+        else:
+            dt_hd = dt
+
+        mean = compute_mean_of_analytical_dynamics(u, t, dt_hd)
+        var = compute_variance_of_analytical_dynamics(t, dt_hd)
+
+        cholesky11 = (torch.sqrt(var[0]))
+        cholesky21 = (var[1] / cholesky11)
+        cholesky22 = (torch.sqrt(var[2] - cholesky21 ** 2.))
+
+        if torch.sum(torch.isnan(cholesky11)) > 0 or torch.sum(torch.isnan(cholesky22)) > 0:
+            raise ValueError('Numerical precision error.')
+
+        batch_randn = torch.randn_like(u, device=u.device)
+        batch_randn_x, batch_randn_v = torch.chunk(batch_randn, 2, dim=1)
+
+        noise_x = cholesky11 * batch_randn_x
+        noise_v = cholesky21 * batch_randn_x + cholesky22 * batch_randn_v
+        noise = torch.cat((noise_x, noise_v), dim=1)
+
+        mean = mean
+        noise = noise
+        perturbed_data = mean + noise
+        return perturbed_data
+
+    def euler_score_dynamics(model, u, t, dt, half_step):
+        if half_step:
+            raise ValueError('Avoid half steps in score dynamics.')
+
+        score_fn = get_score_fn(config, sde, model, train=False)
+        score = score_fn(u, torch.ones(
+            u.shape[0], device=u.device, dtype=torch.float64) * (1. - t))
+
+        x, v = torch.chunk(u, 2, dim=1)
+        v_new = v + 2. * sde.f * (score + sde.m_inv * v) * beta_fn(1. - t) * dt
+
+        return torch.cat((x, v_new), dim=1)
+
+    def abos_sampler(model, u=None):
+        ''' 
+        The ABO sampler takes analytical "half-steps" for the Ornstein--Uhlenbeck
+        and the Hamiltonian components, and evaluates the score model using "full-steps". 
+        '''
+
+        with torch.no_grad():
+            if u is None:
+                x, v = sde.prior_sampling(sampling_shape)
+                if sde.is_augmented:
+                    u = torch.cat((x, v), dim=1)
+                else:
+                    raise ValueError('SSCS sampler does only work for CLD.')
+            else:
+                if not sde.is_augmented:
+                    raise ValueError('SSCS sampler does only work for CLD.')
+
+            for i in range(n_discrete_steps):
+                dt = t[i + 1] - t[i]
+                u = analytical_dynamics(u, t[i], dt, True)
+                u = euler_score_dynamics(model, u, t[i], dt, False)
+                u = analytical_dynamics(u, t[i], dt, True)
+
+            if config.denoising:
+                u = denoising_fn(model, u, 1.0 - eps)
+
+            x, v = torch.chunk(u, 2, dim=1)
+            return x, v, config.n_discrete_steps
+
+    return abos_sampler
+
+
+def get_ubu_sampler(config, sde, sampling_shape, eps):
+    ''' 
+    Sampling from the ReverseSDE using UBU. Only applicable to CLD-SGM.
+    '''
+
+    gc.collect()
+
+    n_discrete_steps = config.n_discrete_steps if not config.denoising else config.n_discrete_steps - 1
+    t_final = 1. - eps
+    t = torch.linspace(0., t_final, n_discrete_steps + 1, dtype=torch.float64)
+    if config.striding == 'linear':
+        pass
+    elif config.striding == 'quadratic':
+        t = t_final * torch.flip(1 - (t / t_final) ** 2., dims=[0])
+
+    beta_fn = sde.beta_fn
+    beta_int_fn = sde.beta_int_fn
+    num_stab = config.sscs_num_stab
+
+    def denoising_fn(model, u, t):
+        score_fn = get_score_fn(config, sde, model, train=False)
+        discrete_step_fn = sde.get_discrete_step_fn(
+            mode='reverse', score_fn=score_fn)
+        u, u_mean = discrete_step_fn(u, t, eps)
+        return u_mean
+
+    def compute_mean_of_analytical_dynamics(u, t, dt):
+        B = (beta_int_fn(1. - (t + dt)) - beta_int_fn(1. - t))
+
+        x, v = torch.chunk(u, 2, dim=1)
+        coeff = torch.exp(2. * sde.g * B)
+
+        mean_x = coeff * ((1. - 2. * sde.g * B) * x + 4. * sde.g ** 2. * B * v)
+        mean_v = coeff * (-B * x + (1. + 2. * sde.g * B) * v)
+        return torch.cat((mean_x, mean_v), dim=1)
+
+    def compute_variance_of_analytical_dynamics(t, dt):
+        B = beta_int_fn(1. - (t + dt)) - beta_int_fn(1. - t)
+        coeff = torch.exp(4. * sde.g * B)
+        var_xx = coeff * (1. / coeff - 1. + 4. * sde.g *
+                          B - 8. * sde.g**2 * B ** 2.)
+        var_xv = -coeff * (4. * sde.g * B ** 2.)
+        var_vv = coeff * (-sde.f ** 2. * (-(1. / coeff) +
+                          1.) / 4. - sde.f * B - 2. * B ** 2.)
+
+        return [var_xx + num_stab, var_xv, var_vv + num_stab]
+
+    def analytical_dynamics(u, t, dt, half_step):
+        if half_step:
+            dt_hd = dt / 2.
+        else:
+            dt_hd = dt
+
+        mean = compute_mean_of_analytical_dynamics(u, t, dt_hd)
+        var = compute_variance_of_analytical_dynamics(t, dt_hd)
+
+        cholesky11 = (torch.sqrt(var[0]))
+        cholesky21 = (var[1] / cholesky11)
+        cholesky22 = (torch.sqrt(var[2] - cholesky21 ** 2.))
+
+        if torch.sum(torch.isnan(cholesky11)) > 0 or torch.sum(torch.isnan(cholesky22)) > 0:
+            raise ValueError('Numerical precision error.')
+
+        batch_randn = torch.randn_like(u, device=u.device)
+        batch_randn_x, batch_randn_v = torch.chunk(batch_randn, 2, dim=1)
+
+        noise_x = cholesky11 * batch_randn_x
+        noise_v = cholesky21 * batch_randn_x + cholesky22 * batch_randn_v
+        noise = torch.cat((noise_x, noise_v), dim=1)
+
+        mean = mean
+        noise = noise
+        perturbed_data = mean + noise
+        return perturbed_data
+
+    def euler_score_dynamics(model, u, t, dt, half_step):
+        if half_step:
+            raise ValueError('Avoid half steps in score dynamics.')
+
+        score_fn = get_score_fn(config, sde, model, train=False)
+        score = score_fn(u, torch.ones(
+            u.shape[0], device=u.device, dtype=torch.float64) * (1. - t))
+
+        x, v = torch.chunk(u, 2, dim=1)
+        v_new = v + 2. * sde.f * (score + sde.m_inv * v) * beta_fn(1. - t) * dt
+
+        return torch.cat((x, v_new), dim=1)
+
+    def ubu_sampler(model, u=None):
+        ''' 
+        The UBU sampler takes analytical "half-steps" for the Ornstein--Uhlenbeck
+        and the Hamiltonian components, and evaluates the score model using "full-steps". 
+        '''
+
+        with torch.no_grad():
+            if u is None:
+                x, v = sde.prior_sampling(sampling_shape)
+                if sde.is_augmented:
+                    u = torch.cat((x, v), dim=1)
+                else:
+                    raise ValueError('UBU sampler does only work for CLD.')
+            else:
+                if not sde.is_augmented:
+                    raise ValueError('UBU sampler does only work for CLD.')
+
+            for i in range(n_discrete_steps):
+                dt = t[i + 1] - t[i]
+                u = analytical_dynamics(u, t[i], dt, True)
+                u = euler_score_dynamics(model, u, t[i], dt, False)
+                u = analytical_dynamics(u, t[i], dt, True)
+
+            if config.denoising:
+                u = denoising_fn(model, u, 1.0 - eps)
+
+            x, v = torch.chunk(u, 2, dim=1)
+            return x, v, config.n_discrete_steps
+
+    return ubu_sampler
