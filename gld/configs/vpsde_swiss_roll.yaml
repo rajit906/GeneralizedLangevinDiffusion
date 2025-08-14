@@ -1,0 +1,40 @@
+# configs/config.yaml
+
+# Paths and logging
+output_dir: ${hydra:run.dir}
+wandb:
+  project: "swissroll"
+  entity: "rajit906" # Your wandb entity (username or team)
+  name: "vpsde-mlp-swissroll-run"
+  log_model: True
+
+# Training parameters
+training:
+  n_epochs: 50
+  batch_size: 1024
+  lr: 1e-2
+  ema_decay: 0.999
+  eval_freq: 1 # Generate samples every 50 epochs
+  n_samples: 2000 # Number of samples to generate for visualization
+
+# Data parameters
+data:
+  n_points: 5000
+  noise: 0.5
+
+# SDE parameters
+sde:
+  beta_min: 0.1
+  beta_max: 20.0
+  N: 1000
+
+# Model parameters
+model:
+  name: "resnet" # or 'resnet'
+  input_dim: 2
+  hidden_dim: 128
+
+# Hydra settings
+hydra:
+  run:
+    dir: checkpoints/vp-sde/${now:%Y-%m-%d}/${now:%H-%M-%S}

@@ -5,98 +5,38 @@
 # CLD-SGM. To view a copy of this license, see the LICENSE file.
 # ---------------------------------------------------------------
 
+# TODOs:
+# Add a symmetric argument to compare sampling methods
+# Add lambda parameter to OU and to reverse SDE.
+# Adaptive stepsizes for SDE?
+# UBUSUBU/BBK splitting
+# BAOSOAB instead of SSCS
+# gDDIM and s-GDDIM. Can we improve with splitting?
+
 import torch
 import gc
 from torchdiffeq import odeint
 from models.utils import get_score_fn
 
 
-def get_sampling_fn(config, sde, sampling_shape, eps):
+def get_sampling_fn(config, sde, sampling_shape, eps, symmetric_flag=False):
     sampler_name = config.sampling_method
     if sampler_name == 'ode':
         return get_ode_sampler(config, sde, sampling_shape, eps)
     elif sampler_name == 'em':
         return get_em_sampler(config, sde, sampling_shape, eps)
     elif sampler_name == 'sscs':
-        return get_sscs_sampler(config, sde, sampling_shape, eps)
+        return get_sscs_sampler(config, sde, sampling_shape, eps, symmetric=symmetric_flag)
+    elif sampler_name == 'baosoab':
+        return get_baosoab_sampler(config, sde, sampling_shape, eps, symmetric=symmetric_flag)
+    elif sampler_name == 'ubsbu':
+        return get_ubsbu_sampler(config, sde, sampling_shape, eps, symmetric=symmetric_flag)
     else:
         raise NotImplementedError(
             'Sampler %s is not implemened.' % sampler_name)
 
 
-def get_ode_sampler(config, sde, sampling_shape, eps):
-    ''' 
-    Sampling from ProbabilityFlow formulation. 
-    '''
-    gc.collect()
-
-    def denoising_fn(model, u, t):
-        score_fn = get_score_fn(config, sde, model, train=False)
-        discrete_step_fn = sde.get_discrete_step_fn(
-            mode='reverse', score_fn=score_fn)
-        u, u_mean = discrete_step_fn(u, t, eps)
-        return u_mean
-
-    def probability_flow_ode(model, u, t):
-        ''' 
-        The "Right-Hand Side" of the ODE. 
-        '''
-        score_fn = get_score_fn(config, sde, model, train=False)
-        rsde = sde.get_reverse_sde(score_fn, probability_flow=True)
-        return rsde(u, t)[0]
-
-    def ode_sampler(model, u=None):
-        with torch.no_grad():
-            if u is None:
-                x, v = sde.prior_sampling(sampling_shape)
-                if sde.is_augmented:
-                    u = torch.cat((x, v), dim=1)
-                else:
-                    u = x
-
-            def ode_func(t, u):
-                global nfe_counter
-                nfe_counter += 1
-                vec_t = torch.ones(
-                    sampling_shape[0], device=u.device, dtype=torch.float64) * t
-                dudt = probability_flow_ode(model, u, vec_t)
-                return dudt
-
-            global nfe_counter
-            nfe_counter = 0
-            time_tensor = torch.tensor(
-                [0., 1. - eps], dtype=torch.float64, device=config.device)
-            solution = odeint(ode_func,
-                              u,
-                              time_tensor,
-                              rtol=config.sampling_rtol,
-                              atol=config.sampling_atol,
-                              method=config.sampling_solver,
-                              options=config.sampling_solver_options)
-
-            u = solution[-1]
-
-            if config.denoising:
-                u = denoising_fn(model, u, 1. - eps)
-                nfe_counter += 1
-
-            if sde.is_augmented:
-                x, v = torch.chunk(u, 2, dim=1)
-                return x, v, nfe_counter
-            else:
-                return u, None, nfe_counter
-
-    return ode_sampler
-
-def gDDIM():
-    raise NotImplementedError
-
-def sgDDIM():
-    raise NotImplementedError
-
-def odeSplitting():
-    raise NotImplementedError
-
+# --------------------- SDE solvers ---------------------------
 
 def get_em_sampler(config, sde, sampling_shape, eps):
     ''' 
@@ -146,7 +86,7 @@ def get_em_sampler(config, sde, sampling_shape, eps):
     return em_sampler
 
 
-def get_sscs_sampler(config, sde, sampling_shape, eps):
+def get_sscs_sampler(config, sde, sampling_shape, eps, symmetric):
     ''' 
     Sampling from the ReverseSDE using our SSCS. Only applicable to CLD-SGM.
     '''
@@ -265,10 +205,10 @@ def get_sscs_sampler(config, sde, sampling_shape, eps):
 
     return sscs_sampler
 
-def get_abo_sampler(config, sde, sampling_shape, eps):
+
+def get_baosoab_sampler(config, sde, sampling_shape, eps, symmetric):
     ''' 
-    Sampling from the ReverseSDE using our ABO. Only applicable to CLD-SGM.
-    TODO: Add string to do integration.
+    Sampling from the ReverseSDE using our BAOAB. Only applicable to CLD-SGM.
     '''
 
     gc.collect()
@@ -354,9 +294,9 @@ def get_abo_sampler(config, sde, sampling_shape, eps):
 
         return torch.cat((x, v_new), dim=1)
 
-    def abos_sampler(model, u=None):
+    def baosoab_sampler(model, u=None):
         ''' 
-        The ABO sampler takes analytical "half-steps" for the Ornstein--Uhlenbeck
+        The SSCS sampler takes analytical "half-steps" for the Ornstein--Uhlenbeck
         and the Hamiltonian components, and evaluates the score model using "full-steps". 
         '''
 
@@ -383,12 +323,11 @@ def get_abo_sampler(config, sde, sampling_shape, eps):
             x, v = torch.chunk(u, 2, dim=1)
             return x, v, config.n_discrete_steps
 
-    return abos_sampler
+    return baosoab_sampler
 
-
-def get_ubu_sampler(config, sde, sampling_shape, eps):
+def get_ubsbu_sampler(config, sde, sampling_shape, eps, symmetric):
     ''' 
-    Sampling from the ReverseSDE using UBU. Only applicable to CLD-SGM.
+    Sampling from the ReverseSDE using our UBU. Only applicable to CLD-SGM.
     '''
 
     gc.collect()
@@ -474,9 +413,9 @@ def get_ubu_sampler(config, sde, sampling_shape, eps):
 
         return torch.cat((x, v_new), dim=1)
 
-    def ubu_sampler(model, u=None):
+    def ubsbu_sampler(model, u=None):
         ''' 
-        The UBU sampler takes analytical "half-steps" for the Ornstein--Uhlenbeck
+        The SSCS sampler takes analytical "half-steps" for the Ornstein--Uhlenbeck
         and the Hamiltonian components, and evaluates the score model using "full-steps". 
         '''
 
@@ -486,10 +425,10 @@ def get_ubu_sampler(config, sde, sampling_shape, eps):
                 if sde.is_augmented:
                     u = torch.cat((x, v), dim=1)
                 else:
-                    raise ValueError('UBU sampler does only work for CLD.')
+                    raise ValueError('SSCS sampler does only work for CLD.')
             else:
                 if not sde.is_augmented:
-                    raise ValueError('UBU sampler does only work for CLD.')
+                    raise ValueError('SSCS sampler does only work for CLD.')
 
             for i in range(n_discrete_steps):
                 dt = t[i + 1] - t[i]
@@ -503,4 +442,79 @@ def get_ubu_sampler(config, sde, sampling_shape, eps):
             x, v = torch.chunk(u, 2, dim=1)
             return x, v, config.n_discrete_steps
 
-    return ubu_sampler
+    return ubsbu_sampler
+
+def sgDDIM():
+    raise NotImplementedError
+
+# --------------------- ODE solvers ---------------------------
+
+def get_ode_sampler(config, sde, sampling_shape, eps):
+    ''' 
+    Sampling from ProbabilityFlow formulation. 
+    '''
+    gc.collect()
+
+    def denoising_fn(model, u, t):
+        score_fn = get_score_fn(config, sde, model, train=False)
+        discrete_step_fn = sde.get_discrete_step_fn(
+            mode='reverse', score_fn=score_fn)
+        u, u_mean = discrete_step_fn(u, t, eps)
+        return u_mean
+
+    def probability_flow_ode(model, u, t):
+        ''' 
+        The "Right-Hand Side" of the ODE. 
+        '''
+        score_fn = get_score_fn(config, sde, model, train=False)
+        rsde = sde.get_reverse_sde(score_fn, probability_flow=True)
+        return rsde(u, t)[0]
+
+    def ode_sampler(model, u=None):
+        with torch.no_grad():
+            if u is None:
+                x, v = sde.prior_sampling(sampling_shape)
+                if sde.is_augmented:
+                    u = torch.cat((x, v), dim=1)
+                else:
+                    u = x
+
+            def ode_func(t, u):
+                global nfe_counter
+                nfe_counter += 1
+                vec_t = torch.ones(
+                    sampling_shape[0], device=u.device, dtype=torch.float64) * t
+                dudt = probability_flow_ode(model, u, vec_t)
+                return dudt
+
+            global nfe_counter
+            nfe_counter = 0
+            time_tensor = torch.tensor(
+                [0., 1. - eps], dtype=torch.float64, device=config.device)
+            solution = odeint(ode_func,
+                              u,
+                              time_tensor,
+                              rtol=config.sampling_rtol,
+                              atol=config.sampling_atol,
+                              method=config.sampling_solver,
+                              options=config.sampling_solver_options)
+
+            u = solution[-1]
+
+            if config.denoising:
+                u = denoising_fn(model, u, 1. - eps)
+                nfe_counter += 1
+
+            if sde.is_augmented:
+                x, v = torch.chunk(u, 2, dim=1)
+                return x, v, nfe_counter
+            else:
+                return u, None, nfe_counter
+
+    return ode_sampler
+
+def gDDIM():
+    raise NotImplementedError
+
+def odeSplitting():
+    raise NotImplementedError

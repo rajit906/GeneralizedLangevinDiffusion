@@ -1,0 +1,9 @@
+cld/checkpoints/
+gld/models/__pycache__/
+gld/__pycache__/
+gld/gmm/__pycache__/
+gld/utils/__pycache__/
+gld/datasets/__pycache__/
+gld/checkpoints/
+cld/results/
+cld/data/
