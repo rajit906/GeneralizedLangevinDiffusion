@@ -5,12 +5,12 @@
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
-from GeneralizedLangevinDiffusion.gld.gmm.viz import plot_aux_dist, plot_position_dist
+from viz import plot_aux_dist, plot_position_dist
 from base import DiffusionModel
-from GeneralizedLangevinDiffusion.gld.gmm.matrix_exp import compute_mean_and_covariance
+from matrix_exp import compute_mean_and_covariance
 import scipy.linalg
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cpu")
 
 class GeneralizedLangevinDiffusion(DiffusionModel):
     """
@@ -21,26 +21,26 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
     def __init__(self, gmm_params, **kwargs):
         super().__init__('Generalized Langevin Diffusion', gmm_params, **kwargs)
         # --- Model Parameters ---
-        self.beta = 4.0
-        self.gamma = 1.0
-        self.lambda_val = 1.
-        self.c = 1.
+        self.beta = 4.
+        self.gamma = 1.
+        self.lambda_val = 0.
+        self.c = 0.
         self.M = 0.25
-        self.M_inv = 1.0 / self.M
+        self.M_inv = 1. / self.M
 
-        self.p_init_var = self.gamma * self.M
-        self.s_init_var = 0.01
+        self.p_init_var = 0.01
+        self.s_init_var = 0.04
 
         self.A = torch.tensor([
-            [0, -self.M_inv, 0],
-            [1, self.M_inv * self.gamma**2, self.gamma * self.lambda_val * self.c],
-            [0, self.gamma * self.lambda_val * self.c, self.lambda_val**2]
+            [0., -self.M_inv, 0.],
+            [1., self.M_inv * self.gamma**2, self.gamma * self.lambda_val * self.c],
+            [0., self.gamma * self.lambda_val * self.c, self.lambda_val**2]
         ], dtype=torch.float32, device=DEVICE)
 
         self.B = torch.tensor([
-            [0, 0, 0],
-            [0, self.gamma, 0],
-            [0, self.gamma * self.lambda_val * self.c, self.lambda_val * np.sqrt(1 - self.c**2)]
+            [0., 0., 0.],
+            [0., self.gamma, 0.],
+            [0., self.gamma * self.lambda_val * self.c, self.lambda_val * np.sqrt(1 - self.c**2)]
         ], dtype=torch.float32, device=DEVICE)
         self.G = np.sqrt(2 * self.beta) * self.B
         self.GGt = self.G @ self.G.T
@@ -74,7 +74,9 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
                 Sigma_t = torch.from_numpy(Sigma_t_np).float().to(DEVICE)
                 means_k.append(mu_t)
                 covs_k.append(Sigma_t)
-
+            # print('t_idx', t_idx)
+            # print('mean', means_k)
+            # print('covs', covs_k)
             self.perturbation_cache[t_idx] = {
                 'weights': self.gmm_params['weights'],
                 'means': means_k,
@@ -90,7 +92,7 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         G_np = self.G.cpu().numpy()
         # Propagator for the linear drift part over half a time step
         # Corresponds to solving dZ/dt = -beta * A * Z
-        M_h_half_np = scipy.linalg.expm(- (h / 2.0) * self.beta * A_np)
+        M_h_half_np = scipy.linalg.expm(- (h / 2.0) * self.beta * A_np) # this is not including beta
         # Covariance of the noise for the linear SDE part over half a time step
         # This is the solution to the Lyapunov equation, obtained by calling the
         # analytical solver with zero initial mean and covariance.
@@ -246,8 +248,8 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         pT_hist = torch.randn(n_hist, device=DEVICE) * np.sqrt(self.M)
         sT_hist = torch.randn(n_hist, device=DEVICE)
         zT_hist = torch.stack([xT_hist, pT_hist, sT_hist], dim=1)
-        reverse_sde_paths = self.solve_reverse_sde(zT_hist, type='sscs').cpu().numpy()
-        reverse_ode_paths = self.solve_pfode(zT_hist).cpu().numpy()
+        reverse_sde_paths = self.solve_reverse_sde(zT_hist, type='em').cpu().numpy()
+        #reverse_ode_paths = self.solve_pfode(zT_hist).cpu().numpy()
 
         fig, axes = plt.subplots(3, 3, figsize=(18, 15))
         fig.suptitle(f'{self.name} Demonstration', fontsize=16)
@@ -266,15 +268,15 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
                 axes[i, 2].set_xlabel('Value')
 
         plot_position_dist(reverse_sde_paths[:, 0, 0], self.gmm_params, axes[0, 2])
-        axes[0, 2].hist(reverse_ode_paths[:, 0, 0], bins=50, density=True, alpha=0.6, color='green')
+        #axes[0, 2].hist(reverse_ode_paths[:, 0, 0], bins=50, density=True, alpha=0.6, color='green')
         axes[0, 2].set_title("Final Position Distribution")
 
         plot_aux_dist(axes[1, 2], (reverse_sde_paths[:, 0, 1], 'Momentum'), target_dist=(0, np.sqrt(self.p_init_var)))
-        axes[1, 2].hist(reverse_ode_paths[:, 0, 1], bins=50, density=True, alpha=0.6, color='green')
+        #axes[1, 2].hist(reverse_ode_paths[:, 0, 1], bins=50, density=True, alpha=0.6, color='green')
         axes[1, 2].set_title("Final Momentum Distribution")
 
         plot_aux_dist(axes[2, 2], (reverse_sde_paths[:, 0, 2], 'Memory'), target_dist=(0, np.sqrt(self.s_init_var)))
-        axes[2, 2].hist(reverse_ode_paths[:, 0, 2], bins=50, density=True, alpha=0.6, color='green')
+        #axes[2, 2].hist(reverse_ode_paths[:, 0, 2], bins=50, density=True, alpha=0.6, color='green')
         axes[2, 2].set_title("Final Memory Distribution")
 
         plt.tight_layout(rect=[0, 0, 1, 0.96])

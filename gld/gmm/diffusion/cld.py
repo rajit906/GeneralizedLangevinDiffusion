@@ -36,12 +36,54 @@ class CriticallyDampedLangevin(DiffusionModel):
         
         self.precompute()
 
+    # def precompute(self):
+    #     print(f"Pre-computing {self.name} analytical moments...")
+    #     ts_np = self.ts.cpu().numpy()
+    #     B_t = self.beta * ts_np
+    #     exp_term2 = np.exp(-4 * B_t / self.Gamma)
+
+    #     M_ts_np = np.zeros((self.n_steps, 2, 2))
+    #     exp_term1 = np.exp(-2 * B_t / self.Gamma)
+    #     M_ts_np[:, 0, 0] = exp_term1 * (2 * B_t / self.Gamma + 1)
+    #     M_ts_np[:, 0, 1] = exp_term1 * (4 * B_t / (self.Gamma**2))
+    #     M_ts_np[:, 1, 0] = exp_term1 * (-B_t)
+    #     M_ts_np[:, 1, 1] = exp_term1 * (-2 * B_t / self.Gamma + 1)
+
+    #     Sigma0_vv = self.gamma_init * self.M
+    #     Sigma_t_xx_added = (np.exp(4*B_t/self.Gamma)-1) + 4*B_t/self.Gamma*(-1) + 4*B_t**2/self.Gamma**2*(-2) + 16*B_t**2/self.Gamma**4*Sigma0_vv
+    #     Sigma_t_xv_added = 4*B_t/self.Gamma**2*Sigma0_vv - 2*B_t**2/self.Gamma*(-2) - 8*B_t**2/self.Gamma**3*Sigma0_vv
+    #     Sigma_t_vv_added = self.Gamma**2/4*(np.exp(4*B_t/self.Gamma)-1) + B_t*self.Gamma + Sigma0_vv*(1+4*B_t**2/self.Gamma**2-4*B_t/self.Gamma) + B_t**2*(-2)
+
+    #     Sigma_ts_added_np = np.zeros((self.n_steps, 2, 2))
+    #     Sigma_ts_added_np[:, 0, 0] = Sigma_t_xx_added * exp_term2
+    #     Sigma_ts_added_np[:, 0, 1] = Sigma_ts_added_np[:, 1, 0] = Sigma_t_xv_added * exp_term2
+    #     Sigma_ts_added_np[:, 1, 1] = Sigma_t_vv_added * exp_term2
+
+    #     self.M_ts = torch.from_numpy(M_ts_np).float().to(DEVICE)
+    #     self.Sigma_ts_added = torch.from_numpy(Sigma_ts_added_np).float().to(DEVICE)
+
+    # def _get_perturbed_params(self, t_idx):
+    #     M_t = self.M_ts[t_idx]; Sigma_t_added = self.Sigma_ts_added[t_idx]
+    #     means_t, covs_t = [], []
+    #     for m, s in zip(self.gmm_params['means'], self.gmm_params['stds']):
+    #         mu0_k = torch.tensor([m, 0.], device=DEVICE)
+    #         Sigma0_k = torch.diag(torch.tensor([s**2, self.v_init_var], device=DEVICE))
+    #         mean_t = M_t @ mu0_k
+    #         cov_t = M_t @ Sigma0_k @ M_t.T + Sigma_t_added
+    #         means_t.append(mean_t); covs_t.append(cov_t)
+    #     # print('t_idx', t_idx)
+    #     # print('mean', means_t)
+    #     # print('covs', covs_t)
+    #     return self.gmm_params['weights'], means_t, covs_t
+
+    # In your CriticallyDampedLangevin class
+
     def precompute(self):
-        print(f"Pre-computing {self.name} analytical moments...")
+        # Pre-computation is simpler now. We only pre-compute the mean propagator.
+        print(f"Pre-computing {self.name} analytical mean propagator...")
         ts_np = self.ts.cpu().numpy()
         B_t = self.beta * ts_np
-        exp_term2 = np.exp(-4 * B_t / self.Gamma)
-
+        
         M_ts_np = np.zeros((self.n_steps, 2, 2))
         exp_term1 = np.exp(-2 * B_t / self.Gamma)
         M_ts_np[:, 0, 0] = exp_term1 * (2 * B_t / self.Gamma + 1)
@@ -49,30 +91,50 @@ class CriticallyDampedLangevin(DiffusionModel):
         M_ts_np[:, 1, 0] = exp_term1 * (-B_t)
         M_ts_np[:, 1, 1] = exp_term1 * (-2 * B_t / self.Gamma + 1)
 
-        Sigma0_vv = self.gamma_init * self.M
-        Sigma_t_xx_added = (np.exp(4*B_t/self.Gamma)-1) + 4*B_t/self.Gamma*(-1) + 4*B_t**2/self.Gamma**2*(-2) + 16*B_t**2/self.Gamma**4*Sigma0_vv
-        Sigma_t_xv_added = 4*B_t/self.Gamma**2*Sigma0_vv - 2*B_t**2/self.Gamma*(-2) - 8*B_t**2/self.Gamma**3*Sigma0_vv
-        Sigma_t_vv_added = self.Gamma**2/4*(np.exp(4*B_t/self.Gamma)-1) + B_t*self.Gamma + Sigma0_vv*(1+4*B_t**2/self.Gamma**2-4*B_t/self.Gamma) + B_t**2*(-2)
-
-        Sigma_ts_added_np = np.zeros((self.n_steps, 2, 2))
-        Sigma_ts_added_np[:, 0, 0] = Sigma_t_xx_added * exp_term2
-        Sigma_ts_added_np[:, 0, 1] = Sigma_ts_added_np[:, 1, 0] = Sigma_t_xv_added * exp_term2
-        Sigma_ts_added_np[:, 1, 1] = Sigma_t_vv_added * exp_term2
-
         self.M_ts = torch.from_numpy(M_ts_np).float().to(DEVICE)
-        self.Sigma_ts_added = torch.from_numpy(Sigma_ts_added_np).float().to(DEVICE)
+        # We will compute the covariance dynamically below.
 
     def _get_perturbed_params(self, t_idx):
-        M_t = self.M_ts[t_idx]; Sigma_t_added = self.Sigma_ts_added[t_idx]
+        # Get the pre-computed mean propagator
+        M_t = self.M_ts[t_idx]
+        
+        # We will now compute the covariance dynamically for each GMM component
+        weights = self.gmm_params['weights']
         means_t, covs_t = [], []
 
         for m, s in zip(self.gmm_params['means'], self.gmm_params['stds']):
+            # --- Step 1: Compute the mean for this component ---
             mu0_k = torch.tensor([m, 0.], device=DEVICE)
-            Sigma0_k = torch.diag(torch.tensor([s**2, self.v_init_var], device=DEVICE))
             mean_t = M_t @ mu0_k
-            cov_t = M_t @ Sigma0_k @ M_t.T + Sigma_t_added
-            means_t.append(mean_t); covs_t.append(cov_t)
-        return self.gmm_params['weights'], means_t, covs_t
+            means_t.append(mean_t)
+
+            # --- Step 2: Compute the full covariance for this component ---
+            # Initial conditions for this GMM component
+            Sigma0_xx = s**2
+            Sigma0_vv = self.gamma_init * self.M
+            
+            # Use the time t corresponding to t_idx
+            t = self.ts[t_idx].item()
+            B_t = self.beta * t
+            
+            # These are the full analytical formulas from Appendix B.1 of the paper
+            exp_term_cov = np.exp(4 * B_t / self.Gamma)
+
+            Sigma_t_xx = Sigma0_xx + exp_term_cov - 1 + (4*B_t/self.Gamma)*(Sigma0_xx - 1) + \
+                         (4*B_t**2/self.Gamma**2)*(Sigma0_xx - 2) + (16*B_t**2/self.Gamma**4)*Sigma0_vv
+            
+            Sigma_t_xv = -B_t*Sigma0_xx + (4*B_t/self.Gamma**2)*Sigma0_vv - \
+                         (2*B_t**2/self.Gamma)*(Sigma0_xx - 2) - (8*B_t**2/self.Gamma**3)*Sigma0_vv
+
+            Sigma_t_vv = (self.Gamma**2/4)*(exp_term_cov - 1) + B_t*self.Gamma + \
+                         Sigma0_vv*(1 + 4*B_t**2/self.Gamma**2 - 4*B_t/self.Gamma) + B_t**2*(Sigma0_xx - 2)
+
+            # Assemble the covariance matrix and apply the outer exponential term
+            cov_t_hat = torch.tensor([[Sigma_t_xx, Sigma_t_xv], [Sigma_t_xv, Sigma_t_vv]], device=DEVICE)
+            cov_t = np.exp(-4 * B_t / self.Gamma) * cov_t_hat
+            covs_t.append(cov_t)
+
+        return weights, means_t, covs_t
 
     def _score_fn(self, z, t_idx):
         weights, means, covs = self._get_perturbed_params(t_idx)
@@ -194,7 +256,7 @@ class CriticallyDampedLangevin(DiffusionModel):
         zT_hist = torch.stack([xT_hist, vT_hist], dim=1)
         
         forward_paths = self.solve_forward_sde(z0_plot).cpu().numpy()
-        reverse_sde_paths = self.solve_reverse_sde(zT_hist, type='sscs').cpu().numpy()
+        reverse_sde_paths = self.solve_reverse_sde(zT_hist, type='em').cpu().numpy()
         #reverse_ode_paths = self.solve_pfode(zT_hist).cpu().numpy()
         
         fig, axes = plt.subplots(2, 3, figsize=(18, 10)); fig.suptitle(f'{self.name} Demonstration', fontsize=16)
