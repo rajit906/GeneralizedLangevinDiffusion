@@ -13,9 +13,9 @@ DEVICE = torch.device("cpu")
 class CriticallyDampedLangevin(DiffusionModel):
     """Implements Critically Damped Langevin Diffusion (CLD)."""
     def __init__(self, gmm_params, **kwargs):
-        self.M = 0.25
-        self.Gamma = 1.0
-        self.beta = 4.0
+        self.M = 1.
+        self.Gamma = 2.0
+        self.beta = 8.0 * np.sqrt(self.M)
         self.gamma_init = 0.04
         v_init_var = self.gamma_init * self.M
         super().__init__('Critically Damped Langevin', gmm_params, **kwargs)
@@ -35,48 +35,6 @@ class CriticallyDampedLangevin(DiffusionModel):
         self.GGt = self.G @ self.G.T
         
         self.precompute()
-
-    # def precompute(self):
-    #     print(f"Pre-computing {self.name} analytical moments...")
-    #     ts_np = self.ts.cpu().numpy()
-    #     B_t = self.beta * ts_np
-    #     exp_term2 = np.exp(-4 * B_t / self.Gamma)
-
-    #     M_ts_np = np.zeros((self.n_steps, 2, 2))
-    #     exp_term1 = np.exp(-2 * B_t / self.Gamma)
-    #     M_ts_np[:, 0, 0] = exp_term1 * (2 * B_t / self.Gamma + 1)
-    #     M_ts_np[:, 0, 1] = exp_term1 * (4 * B_t / (self.Gamma**2))
-    #     M_ts_np[:, 1, 0] = exp_term1 * (-B_t)
-    #     M_ts_np[:, 1, 1] = exp_term1 * (-2 * B_t / self.Gamma + 1)
-
-    #     Sigma0_vv = self.gamma_init * self.M
-    #     Sigma_t_xx_added = (np.exp(4*B_t/self.Gamma)-1) + 4*B_t/self.Gamma*(-1) + 4*B_t**2/self.Gamma**2*(-2) + 16*B_t**2/self.Gamma**4*Sigma0_vv
-    #     Sigma_t_xv_added = 4*B_t/self.Gamma**2*Sigma0_vv - 2*B_t**2/self.Gamma*(-2) - 8*B_t**2/self.Gamma**3*Sigma0_vv
-    #     Sigma_t_vv_added = self.Gamma**2/4*(np.exp(4*B_t/self.Gamma)-1) + B_t*self.Gamma + Sigma0_vv*(1+4*B_t**2/self.Gamma**2-4*B_t/self.Gamma) + B_t**2*(-2)
-
-    #     Sigma_ts_added_np = np.zeros((self.n_steps, 2, 2))
-    #     Sigma_ts_added_np[:, 0, 0] = Sigma_t_xx_added * exp_term2
-    #     Sigma_ts_added_np[:, 0, 1] = Sigma_ts_added_np[:, 1, 0] = Sigma_t_xv_added * exp_term2
-    #     Sigma_ts_added_np[:, 1, 1] = Sigma_t_vv_added * exp_term2
-
-    #     self.M_ts = torch.from_numpy(M_ts_np).float().to(DEVICE)
-    #     self.Sigma_ts_added = torch.from_numpy(Sigma_ts_added_np).float().to(DEVICE)
-
-    # def _get_perturbed_params(self, t_idx):
-    #     M_t = self.M_ts[t_idx]; Sigma_t_added = self.Sigma_ts_added[t_idx]
-    #     means_t, covs_t = [], []
-    #     for m, s in zip(self.gmm_params['means'], self.gmm_params['stds']):
-    #         mu0_k = torch.tensor([m, 0.], device=DEVICE)
-    #         Sigma0_k = torch.diag(torch.tensor([s**2, self.v_init_var], device=DEVICE))
-    #         mean_t = M_t @ mu0_k
-    #         cov_t = M_t @ Sigma0_k @ M_t.T + Sigma_t_added
-    #         means_t.append(mean_t); covs_t.append(cov_t)
-    #     # print('t_idx', t_idx)
-    #     # print('mean', means_t)
-    #     # print('covs', covs_t)
-    #     return self.gmm_params['weights'], means_t, covs_t
-
-    # In your CriticallyDampedLangevin class
 
     def precompute(self):
         # Pre-computation is simpler now. We only pre-compute the mean propagator.
@@ -256,29 +214,30 @@ class CriticallyDampedLangevin(DiffusionModel):
         zT_hist = torch.stack([xT_hist, vT_hist], dim=1)
         
         forward_paths = self.solve_forward_sde(z0_plot).cpu().numpy()
-        reverse_sde_paths = self.solve_reverse_sde(zT_hist, type='em').cpu().numpy()
+        reverse_sde_paths = self.solve_reverse_sde(zT_hist, type='sscs').cpu().numpy()
         #reverse_ode_paths = self.solve_pfode(zT_hist).cpu().numpy()
         
         fig, axes = plt.subplots(2, 3, figsize=(18, 10)); fig.suptitle(f'{self.name} Demonstration', fontsize=16)
         
         ts_cpu = self.ts.cpu()
         
-        axes[0, 0].plot(ts_cpu, forward_paths[:, :, 0].T, lw=1.5); axes[0, 0].set_title('Forward: Position'); axes[0, 0].set_ylabel('Position')
-        axes[0, 1].plot(ts_cpu, reverse_sde_paths[:n_plot, :, 0].T, lw=1.5, alpha=0.5)
+        axes[0, 0].plot(ts_cpu, forward_paths[:, :, 0].T, lw=1.5); axes[0, 0].set_title('Forward: Position'); axes[0, 0].set_ylabel('Position'); axes[0, 0].set_ylim(-6, 6)
+        axes[0, 1].plot(ts_cpu, reverse_sde_paths[:n_plot, :, 0].T, lw=1.5, alpha=0.5); axes[0, 1].set_ylim(-6, 6)
         #axes[0, 1].plot(ts_cpu, reverse_ode_paths[:n_plot, :, 0].T, lw=1.0, alpha=0.8, color='green')
         axes[0, 1].set_title('Reverse: Position')
 
         plot_position_dist(reverse_sde_paths[:, 0, 0], self.gmm_params, axes[0, 2])
+        axes[0, 2].set_xlim(-6, 6)
         #axes[0, 2].hist(reverse_ode_paths[:, 0, 0], bins=50, density=True, alpha=0.6, color='green')
         axes[0, 2].set_title("Final Position Distribution")
 
-        axes[1, 0].plot(ts_cpu, forward_paths[:, :, 1].T, lw=1.5); axes[1, 0].set_title('Forward: Momentum'); axes[1, 0].set_xlabel('Time'); axes[1, 0].set_ylabel('Momentum')
+        axes[1, 0].plot(ts_cpu, forward_paths[:, :, 1].T, lw=1.5); axes[1, 0].set_title('Forward: Momentum'); axes[1, 0].set_xlabel('Time'); axes[1, 0].set_ylabel('Momentum'); axes[1, 0].set_ylim(-6, 6)
         axes[1, 1].plot(ts_cpu, reverse_sde_paths[:n_plot, :, 1].T, lw=1.5, alpha=0.5)
         #axes[1, 1].plot(ts_cpu, reverse_ode_paths[:n_plot, :, 1].T, lw=1.0, alpha=0.8, color='green')
-        axes[1, 1].set_title('Reverse: Momentum'); axes[1, 1].set_xlabel('Time')
+        axes[1, 1].set_title('Reverse: Momentum'); axes[1, 1].set_xlabel('Time'); axes[1, 1].set_ylim(-6, 6)
         
         plot_aux_dist(axes[1, 2], (reverse_sde_paths[:, 0, 1], 'Momentum'), target_dist=(0, np.sqrt(self.v_init_var)))
         #axes[1, 2].hist(reverse_ode_paths[:, 0, 1], bins=50, density=True, alpha=0.6, color='green')
-        axes[1, 2].set_title("Final Momentum Distribution")
+        axes[1, 2].set_title("Final Momentum Distribution"); axes[1, 2].set_xlim(-4, 4)
         
         plt.tight_layout(rect=[0, 0, 1, 0.96]); plt.show()

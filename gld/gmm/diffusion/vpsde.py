@@ -1,11 +1,11 @@
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
-from GeneralizedLangevinDiffusion.gld.gmm.viz import plot_aux_dist, plot_position_dist
+from viz import plot_aux_dist, plot_position_dist
 from scipy.signal import convolve
 from base import DiffusionModel
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cpu")
 
 class VPSDE(DiffusionModel):
     """Implements the first-order Variance Preserving SDE."""

@@ -1,14 +1,10 @@
-# TODO: 
-# Fix numerical stability with lam=0. 
-# Cache the covariance integration in matrix_exp if possible. 
-# Implement PFODE with inbuilt solver.
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
 from viz import plot_aux_dist, plot_position_dist
 from base import DiffusionModel
-from matrix_exp import compute_mean_and_covariance
 import scipy.linalg
+from matrix_exp import stationary_covariance, compute_mean_and_covariance
 
 DEVICE = torch.device("cpu")
 
@@ -21,14 +17,14 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
     def __init__(self, gmm_params, **kwargs):
         super().__init__('Generalized Langevin Diffusion', gmm_params, **kwargs)
         # --- Model Parameters ---
-        self.beta = 4.
-        self.gamma = 1.
-        self.lambda_val = 0.
-        self.c = 0.
-        self.M = 0.25
+        self.gamma = 2.
+        self.c = 0.1
+        self.lambda_val = 2/(1-self.c**2)
+        self.M = 1.
         self.M_inv = 1. / self.M
+        self.beta = 8. * np.sqrt(self.M)
 
-        self.p_init_var = 0.01
+        self.p_init_var = 0.01 * self.M
         self.s_init_var = 0.04
 
         self.A = torch.tensor([
@@ -40,8 +36,9 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         self.B = torch.tensor([
             [0., 0., 0.],
             [0., self.gamma, 0.],
-            [0., self.gamma * self.lambda_val * self.c, self.lambda_val * np.sqrt(1 - self.c**2)]
+            [0., self.lambda_val * self.c, self.lambda_val * np.sqrt(1 - self.c**2)]
         ], dtype=torch.float32, device=DEVICE)
+
         self.G = np.sqrt(2 * self.beta) * self.B
         self.GGt = self.G @ self.G.T
         self.perturbation_cache = {}
@@ -57,6 +54,7 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         A_np = self.A.cpu().numpy()
         G_np = self.G.cpu().numpy()
         ts_np = self.ts.cpu().numpy()
+        C_np = stationary_covariance(self.beta, A_np, G_np)
 
         for t_idx, t in enumerate(ts_np):
             means_k = []
@@ -68,7 +66,7 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
                 ])
 
                 mu_t_np, Sigma_t_np = compute_mean_and_covariance(
-                    t, self.beta, A_np, G_np, mu0_k_np, Sigma0_k_np
+                    t, self.beta, A_np, G_np, mu0_k_np, Sigma0_k_np, C_np
                 )
                 mu_t = torch.from_numpy(mu_t_np).float().to(DEVICE)
                 Sigma_t = torch.from_numpy(Sigma_t_np).float().to(DEVICE)
@@ -84,31 +82,7 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
             }
         print("Precomputation finished.")
 
-    def precompute_sscs_params(self):
-        """Precomputes matrices needed for the SSCS solver."""
-        print("Precomputing matrices for SSCS solver...")
-        h = self.dt.item()
-        A_np = self.A.cpu().numpy()
-        G_np = self.G.cpu().numpy()
-        # Propagator for the linear drift part over half a time step
-        # Corresponds to solving dZ/dt = -beta * A * Z
-        M_h_half_np = scipy.linalg.expm(- (h / 2.0) * self.beta * A_np) # this is not including beta
-        # Covariance of the noise for the linear SDE part over half a time step
-        # This is the solution to the Lyapunov equation, obtained by calling the
-        # analytical solver with zero initial mean and covariance.
-        _, Sigma_h_half_np = compute_mean_and_covariance(
-            h / 2.0, self.beta, A_np, G_np, np.zeros(3), np.zeros((3, 3))
-        )
-        # Cholesky decomposition for efficient noise sampling
-        # Add a small identity matrix for numerical stability before decomposition
-        L_h_half_np = np.linalg.cholesky(Sigma_h_half_np + 1e-8 * np.eye(3))
-        # Store matrices as torch tensors on the correct device
-        self.M_h_half = torch.from_numpy(M_h_half_np).float().to(DEVICE)
-        self.L_h_half = torch.from_numpy(L_h_half_np).float().to(DEVICE)
-        print("SSCS precomputation finished.")
-
-
-    def solve_forward_sde(self, z0):
+    def solve_forward_sde_em(self, z0):
         """Solves the forward SDE dz = -beta * A * z * dt + G * dW using Euler-Maruyama."""
         print(f"Solving forward SDE for {self.name}...")
         zs = torch.zeros((z0.shape[0], self.n_steps, 3), device=DEVICE)
@@ -122,6 +96,25 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
             diffusion = (self.G @ dW.T).T
             dz = drift * self.dt + diffusion
             zs[:, i + 1, :] = z + dz
+        return zs
+    
+    def solve_forward_sde_anal(self, z0):
+        """Solves the forward SDE using precomputed perturbation kernels (cached GMM)."""
+        print(f"Solving forward SDE analytically for {self.name}...")
+        zs = torch.zeros((z0.shape[0], self.n_steps, 3), device=DEVICE)
+        zs[:, 0, :] = z0
+        for i in range(1, self.n_steps):
+            weights, means_k, covs_k = self._get_perturbed_params(i)
+            component_probs = torch.tensor(weights, device=DEVICE)
+            component_indices = torch.multinomial(component_probs, z0.shape[0], replacement=True)
+            z_samples = []
+            for j, comp_idx in enumerate(component_indices):
+                mean_k = means_k[comp_idx]
+                cov_k = covs_k[comp_idx]
+                stable_cov = cov_k + 1e-6 * torch.eye(3, device=DEVICE)
+                dist = torch.distributions.MultivariateNormal(mean_k, stable_cov)
+                z_samples.append(dist.sample())
+            zs[:, i, :] = torch.stack(z_samples)
         return zs
 
     def _get_perturbed_params(self, t_idx):
@@ -169,38 +162,78 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
                 zs[:, i - 1, :] = z - drift_rev * self.dt + diffusion
         return zs
     
+
+    def precompute_sscs(self):
+        """
+        Precomputes everything needed for the analytical score and the SSCS sampler.
+        """
+        print("Precomputing for SSCS sampler...")
+        A_H = np.array([
+            [0., -self.M_inv, 0.],
+            [1., 0., 0.],
+            [0., 0., 0.]
+        ])
+        A_O = self.A.cpu().numpy() - A_H
+        
+        F_O = -self.beta * A_O
+        dt_half = (self.dt / 2).item()
+        
+        exp_FO_half_np = scipy.linalg.expm(-F_O * dt_half)
+        self.exp_FO_half = torch.from_numpy(exp_FO_half_np).float().to(DEVICE)
+
+        C_O = stationary_covariance(self.beta, A_O, self.G.cpu().numpy())
+        _, Sigma_OU_half_np = compute_mean_and_covariance(dt_half, self.beta, A_O, self.G.cpu().numpy(), mu_0=np.zeros(3), Sigma_0=np.zeros((3, 3)), C=C_O)
+        self.L_OU_half = torch.from_numpy(np.linalg.cholesky(Sigma_OU_half_np + 1e-9 * np.eye(3))).float().to(DEVICE)
+        print("SSCS precomputation finished.")
+    
     def solve_reverse_sde_sscs(self, zT):
         """
-        Solves the reverse SDE using a symmetric splitting scheme (A-B-A).
-        - A-step: Exact solution of the linear OU process part.
-        - B-step: Euler step for the non-linear score drift part.
+        Solves the reverse SDE using a symmetric splitting integrator:
+        A_H(dt/2) -> A_O(dt/2) -> S(dt) -> A_O(dt/2) -> A_H(dt/2)
         """
         print(f"Solving reverse SDE for {self.name} with SSCS...")
-        zs = torch.zeros((zT.shape[0], self.n_steps, 3), device=DEVICE)
+        zs = torch.zeros_like(zT).unsqueeze(1).repeat(1, self.n_steps, 1)
         zs[:, -1, :] = zT
-        h = self.dt
+        
+        dt_half = self.dt / 2.0
 
-        # Iterate backwards from T to 0
         for i in range(self.n_steps - 1, 0, -1):
-            z_curr = zs[:, i, :]
-            # --- First A-Step: Evolve by -h/2 with the linear OU process ---
-            mu1 = z_curr @ self.M_h_half.T
-            noise1 = torch.randn_like(z_curr) @ self.L_h_half.T
-            z_half = mu1 + noise1
-            # --- B-Step: Evolve by -h with the score drift (Euler step) ---
-            # The state z_half is at the midpoint in time, t_i - h/2.
-            # We approximate the score at this time by using the parameters for t_i.
-            score_full = self._score_fn(z_half, i)
-            score_drift = (self.GGt @ score_full.T).T
-            # The reverse drift for this part is `score_drift`. We evolve backwards by h.
-            z_half_prime = z_half - h * score_drift
-            # --- Second A-Step: Evolve by -h/2 with the linear OU process ---
-            mu2 = z_half_prime @ self.M_h_half.T
-            noise2 = torch.randn_like(z_curr) @ self.L_h_half.T
-            z_next = mu2 + noise2
-            zs[:, i - 1, :] = z_next
+            z = zs[:, i, :]
+            t_idx = i
+
+            # --- Step 1: Hamiltonian Half-Step (A_H for dt/2) ---
+            x, p, s = z.split(1, dim=-1)
+            p1 = p + (self.beta * x) * dt_half
+            x1 = x - (self.beta * self.M_inv * p1) * dt_half
+            z1 = torch.cat([x1, p1, s], dim=-1)
+
+            # --- Step 2: Ornstein-Uhlenbeck Half-Step (A_O for dt/2) ---
+            # Apply pre-computed drift and diffusion
+            z2_drift = (self.exp_FO_half @ z1.T).T
+            noise1 = (self.L_OU_half @ torch.randn_like(z1).T).T
+            z2 = z2_drift + noise1
+
+            # --- Step 3: Score Full-Step (S for dt) ---
+            score_old = self._score_fn(z2, t_idx)
+            score_drift_old = (self.GGt @ score_old.T).T
+            z3 = z2 + score_drift_old * self.dt
+
+            # --- Step 4: Ornstein-Uhlenbeck Half-Step (A_O for dt/2) ---
+            z4_drift = (self.exp_FO_half @ z3.T).T
+            noise2 = (self.L_OU_half @ torch.randn_like(z3).T).T
+            z4 = z4_drift + noise2
+
+            # --- Step 5: Hamiltonian Half-Step (A_H for dt/2, symmetric) ---
+            x4, p4, s4 = z4.split(1, dim=-1)
+            x5 = x4 - (self.beta * self.M_inv * p4) * dt_half
+            p5 = p4 + (self.beta * x5) * dt_half
+            z_next = torch.cat([x5, p5, s4], dim=-1)
+            
+            zs[:, i-1, :] = z_next
+
         return zs
-    
+
+
     def solve_reverse_sde_ubu(self, zT):
         return None
     
@@ -208,10 +241,21 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         if type=='em':
             return self.solve_reverse_sde_em(zT)
         elif type == 'sscs':
-            self.precompute_sscs_params()
+            self.precompute_sscs()
             return self.solve_reverse_sde_sscs(zT)
         elif type == 'ubu':
             return self.solve_reverse_sde_ubu(zT)
+        
+    def solve_forward_sde(self, zT, type='em'):
+        if type=='em':
+            return self.solve_forward_sde_em(zT)
+        elif type == 'sscs':
+            self.precompute_sscs()
+            return self.solve_forward_sde_sscs(zT)
+        elif type == 'ubu':
+            return self.solve_forward_sde_ubu(zT)
+        elif type == 'anal':
+            return self.solve_forward_sde_anal(zT)
 
     def solve_pfode(self, zT):
         """
@@ -242,42 +286,61 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         s0 = torch.randn(n_plot, device=DEVICE) * np.sqrt(self.s_init_var)
         z0 = torch.stack([x0, p0, s0], dim=-1)
 
-        forward_sde_paths = self.solve_forward_sde(z0).cpu().numpy()
+        forward_sde_paths = self.solve_forward_sde(z0, type='em').cpu().numpy()
 
         xT_hist = torch.randn(n_hist, device=DEVICE)
         pT_hist = torch.randn(n_hist, device=DEVICE) * np.sqrt(self.M)
         sT_hist = torch.randn(n_hist, device=DEVICE)
         zT_hist = torch.stack([xT_hist, pT_hist, sT_hist], dim=1)
-        reverse_sde_paths = self.solve_reverse_sde(zT_hist, type='em').cpu().numpy()
+        reverse_sde_paths = self.solve_reverse_sde(zT_hist, type='sscs').cpu().numpy()
         #reverse_ode_paths = self.solve_pfode(zT_hist).cpu().numpy()
 
         fig, axes = plt.subplots(3, 3, figsize=(18, 15))
         fig.suptitle(f'{self.name} Demonstration', fontsize=16)
         var_names = ['Position (x)', 'Momentum (p)', 'Memory (s)']
         ts_cpu = self.ts.cpu().numpy()
+        
         for i in range(3):
-            axes[i, 0].plot(ts_cpu, forward_sde_paths[:, :, i].T, lw=1.5, alpha=0.6, color='blue')
+            # Forward
+            axes[i, 0].plot(ts_cpu, forward_sde_paths[:, :, i].T, lw=1.5, alpha=0.6)
             axes[i, 0].set_title(f'Forward: {var_names[i]}')
             axes[i, 0].set_ylabel(var_names[i])
+            axes[i, 0].set_ylim(-6, 6)
+
+            # Reverse
             axes[i, 1].plot(ts_cpu, reverse_sde_paths[:n_plot, :, i].T, lw=1.5, alpha=0.5)
             #axes[i, 1].plot(ts_cpu, reverse_ode_paths[:n_plot, :, i].T, lw=1.0, alpha=0.8, color='green')
             axes[i, 1].set_title(f'Reverse: {var_names[i]}')
+            axes[i, 1].set_ylim(-6, 6)
+
             if i == 2:
                 axes[i, 0].set_xlabel('Time')
                 axes[i, 1].set_xlabel('Time')
                 axes[i, 2].set_xlabel('Value')
 
-        plot_position_dist(reverse_sde_paths[:, 0, 0], self.gmm_params, axes[0, 2])
-        #axes[0, 2].hist(reverse_ode_paths[:, 0, 0], bins=50, density=True, alpha=0.6, color='green')
+        position_data = reverse_sde_paths[:, 0, 0]
+        momentum_data = reverse_sde_paths[:, 0, 1]
+        memory_data = reverse_sde_paths[:, 0, 2]
+
+        # Remove outliers > 1000
+        position_filtered = position_data[np.abs(position_data) <= 1000]
+        momentum_filtered = momentum_data[np.abs(momentum_data) <= 1000]
+        memory_filtered = memory_data[np.abs(memory_data) <= 1000]
+
+        # Final distributions (3rd column, set x-limits)
+        plot_position_dist(position_filtered, self.gmm_params, axes[0, 2])
         axes[0, 2].set_title("Final Position Distribution")
+        axes[0, 2].set_xlim(-6, 6)
 
-        plot_aux_dist(axes[1, 2], (reverse_sde_paths[:, 0, 1], 'Momentum'), target_dist=(0, np.sqrt(self.p_init_var)))
-        #axes[1, 2].hist(reverse_ode_paths[:, 0, 1], bins=50, density=True, alpha=0.6, color='green')
+        plot_aux_dist(axes[1, 2], (momentum_filtered, 'Momentum'),
+                    target_dist=(0, np.sqrt(self.p_init_var)))
         axes[1, 2].set_title("Final Momentum Distribution")
+        axes[1, 2].set_xlim(-4, 4)
 
-        plot_aux_dist(axes[2, 2], (reverse_sde_paths[:, 0, 2], 'Memory'), target_dist=(0, np.sqrt(self.s_init_var)))
-        #axes[2, 2].hist(reverse_ode_paths[:, 0, 2], bins=50, density=True, alpha=0.6, color='green')
+        plot_aux_dist(axes[2, 2], (memory_filtered, 'Memory'),
+                    target_dist=(0, np.sqrt(self.s_init_var)))
         axes[2, 2].set_title("Final Memory Distribution")
+        axes[2, 2].set_xlim(-4, 4)
 
         plt.tight_layout(rect=[0, 0, 1, 0.96])
         plt.show()
