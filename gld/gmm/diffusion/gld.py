@@ -17,9 +17,9 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
     def __init__(self, gmm_params, **kwargs):
         super().__init__('Generalized Langevin Diffusion', gmm_params, **kwargs)
         # --- Model Parameters ---
-        self.gamma = 1.
-        self.c = 0.5
-        self.lambda_val = 1.
+        self.gamma = 5.86961215
+        self.c = 0.9999
+        self.lambda_val = 7.48351271
         self.M = 1.
         self.M_inv = 1. / self.M
         self.beta = 8. * np.sqrt(self.M)
