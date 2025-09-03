@@ -70,12 +70,32 @@ class VPSDE(DiffusionModel):
         return xs
 
     def run_demonstration(self, n_plot, n_hist):
-        print(f"Running demonstration for {self.name}...")
-        x0_plot = self._get_initial_samples(n_plot); xT_hist = torch.randn(n_hist, device=DEVICE)
+        x0_plot = self._get_initial_samples(n_plot)
+        xT_hist = torch.randn(n_hist, device=DEVICE)
+        
         forward_paths = self.solve_forward_sde(x0_plot).cpu().numpy()
         reverse_paths = self.solve_reverse_sde(xT_hist).cpu().numpy()
-        fig, axes = plt.subplots(1, 3, figsize=(18, 5)); fig.suptitle(f'{self.name} Demonstration', fontsize=16)
-        axes[0].plot(self.ts.cpu(), forward_paths.T, lw=1.5); axes[0].set_title('Forward Process'); axes[0].set_xlabel('Time'); axes[0].set_ylabel('Position')
-        axes[1].plot(self.ts.cpu(), reverse_paths[:n_plot].T, lw=1.5); axes[1].set_title('Reverse Process'); axes[1].set_xlabel('Time')
+        
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        fig.suptitle(f'{self.name} Demonstration', fontsize=16)
+        
+        ts_cpu = self.ts.cpu()
+        
+        # Forward Process
+        axes[0].plot(ts_cpu, forward_paths[10:].T, lw=1.5, color='darkblue', alpha=0.05)
+        axes[0].plot(ts_cpu, forward_paths[:10].T, lw=1.5, color='darkblue', alpha=1.0)
+        axes[0].set_title('Forward Process')
+        axes[0].set_xlabel('Time')
+        axes[0].set_ylabel('Position')
+        
+        # Reverse Process
+        axes[1].plot(ts_cpu, reverse_paths[10:n_plot].T, lw=1.5, color='darkblue', alpha=0.05)
+        axes[1].plot(ts_cpu, reverse_paths[:10].T, lw=1.5, color='darkblue', alpha=1.0)
+        axes[1].set_title('Reverse Process')
+        axes[1].set_xlabel('Time')
+        
+        # Final Distribution
         plot_position_dist(reverse_paths[:, 0], self.gmm_params, axes[2])
-        plt.tight_layout(rect=[0, 0, 1, 0.96]); plt.show()
+        
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        plt.show()

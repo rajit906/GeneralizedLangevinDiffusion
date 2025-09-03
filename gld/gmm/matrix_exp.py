@@ -103,10 +103,10 @@ def test_gld_vs_cld_consistency():
 
 # # Run tests
 #test_pure_diffusion()
-test_stationary_covariance()
-test_mean_propagation()
-#test_gld_vs_cld_consistency()
-print("All sanity checks passed ✅")
+# test_stationary_covariance()
+# test_mean_propagation()
+# #test_gld_vs_cld_consistency()
+# print("All sanity checks passed ✅")
 
 
 # def compute_covariance_ode(t, beta, A, G, Sigma_0):

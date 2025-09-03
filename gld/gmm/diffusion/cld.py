@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from viz import plot_aux_dist, plot_position_dist
 from base import DiffusionModel
+from scipy.integrate import solve_ivp
+import scipy.linalg
 
 DEVICE = torch.device("cpu")
 
@@ -16,15 +18,15 @@ class CriticallyDampedLangevin(DiffusionModel):
         self.M = 1.
         self.Gamma = 2.0
         self.beta = 8.0 * np.sqrt(self.M)
-        self.gamma_init = 0.04
+        self.gamma_init = 1.#0.04
         v_init_var = self.gamma_init * self.M
         super().__init__('Critically Damped Langevin', gmm_params, **kwargs)
         self.v_init_var = v_init_var
 
-        M_inv = 1.0 / self.M
+        self.M_inv = 1.0 / self.M
         self.A = torch.tensor([
-            [0, -M_inv],
-            [1, self.Gamma * M_inv]
+            [0, -self.M_inv],
+            [1, self.Gamma * self.M_inv]
         ], dtype=torch.float32, device=DEVICE)
 
         self.G = torch.tensor([
@@ -38,7 +40,6 @@ class CriticallyDampedLangevin(DiffusionModel):
 
     def precompute(self):
         # Pre-computation is simpler now. We only pre-compute the mean propagator.
-        print(f"Pre-computing {self.name} analytical mean propagator...")
         ts_np = self.ts.cpu().numpy()
         B_t = self.beta * ts_np
         
@@ -111,7 +112,6 @@ class CriticallyDampedLangevin(DiffusionModel):
 
     def solve_forward_sde(self, z0):
         """Solves the forward SDE using matrix operations."""
-        print(f"Solving forward SDE for {self.name}...")
         zs = torch.zeros(z0.shape[0], self.n_steps, 2, device=DEVICE)
         zs[:, 0, :] = z0
         sqrt_dt = torch.sqrt(self.dt)
@@ -129,7 +129,6 @@ class CriticallyDampedLangevin(DiffusionModel):
         """
         Solves the reverse SDE using the Euler-Maruyama method.
         """
-        print(f"Solving reverse SDE for {self.name} with Euler-Maruyama...")
         zs = torch.zeros(zT.shape[0], self.n_steps, 2, device=DEVICE)
         zs[:, -1, :] = zT
         sqrt_dt = torch.sqrt(self.dt)
@@ -183,30 +182,45 @@ class CriticallyDampedLangevin(DiffusionModel):
         elif type == 'ubu':
             return self.solve_reverse_sde_ubu(zT)
 
-    def solve_pfode(self, zT):
+    def solve_pfode(self, zT, method="RK45"):
         """
-        Solves the reverse process using the Probability Flow ODE (deterministic).
+        Solves the reverse process using the Probability Flow ODE with SciPy solvers.
+        method: one of {"RK45", "RK23", "Radau", "BDF", "LSODA", "Euler"} 
         """
-        print(f"Solving reverse PF-ODE for {self.name}...")
-        zs = torch.zeros((zT.shape[0], self.n_steps, 2), device=DEVICE)
-        zs[:, -1, :] = zT
+        z0 = zT.detach().cpu().numpy()
 
-        for i in range(self.n_steps - 1, -1, -1):
-            z = zs[:, i, :]
-            score_full = self._score_fn(z, i)
-            
+        def drift(t, z_flat):
+            # Reshape back to (batch, 2)
+            z = torch.tensor(z_flat.reshape(-1, 2), dtype=torch.float32, device=DEVICE)
+            # compute score
+            t_idx = int(np.clip(t / self.T * (self.n_steps - 1), 0, self.n_steps - 1))
+            score_full = self._score_fn(z, t_idx)
+
             f_fwd = -self.beta * (self.A @ z.T).T
             score_drift = (self.GGt @ score_full.T).T
-            
             drift_ode = -f_fwd + 0.5 * score_drift
-            
-            if i > 0:
-                zs[:, i - 1, :] = z - drift_ode * self.dt
-                
-        return zs
+            return drift_ode.cpu().numpy().flatten()
+
+        # Integrate from T → 0
+        sol = solve_ivp(
+            drift, 
+            t_span=[self.T, 0], 
+            y0=z0.flatten(), 
+            method=method, 
+            t_eval=np.linspace(self.T, 0, self.n_steps)
+        )
+
+        zs = torch.tensor(sol.y.T.reshape(self.n_steps, -1, 2), dtype=torch.float32, device=DEVICE)
+        return zs.permute(1, 0, 2)  # shape: (batch, n_steps, 2)
+    
+    def solve_forward_sde_sscs(self, n_samples):
+        """
+        Simulates forward SDE SSCS  by sampling from the perturbation kernels.
+        """
+        return None
+
 
     def run_demonstration(self, n_plot, n_hist):
-        print(f"Running demonstration for {self.name}...")
         x0_plot = self._get_initial_samples(n_plot)
         z0_plot = torch.stack([x0_plot, torch.randn(n_plot, device=DEVICE) * np.sqrt(self.v_init_var)], dim=1)
         xT_hist = torch.randn(n_hist, device=DEVICE)
@@ -215,29 +229,51 @@ class CriticallyDampedLangevin(DiffusionModel):
         
         forward_paths = self.solve_forward_sde(z0_plot).cpu().numpy()
         reverse_sde_paths = self.solve_reverse_sde(zT_hist, type='sscs').cpu().numpy()
-        #reverse_ode_paths = self.solve_pfode(zT_hist).cpu().numpy()
         
-        fig, axes = plt.subplots(2, 3, figsize=(18, 10)); fig.suptitle(f'{self.name} Demonstration', fontsize=16)
+        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+        fig.suptitle(f'{self.name} Demonstration', fontsize=16)
         
         ts_cpu = self.ts.cpu()
         
-        axes[0, 0].plot(ts_cpu, forward_paths[:, :, 0].T, lw=1.5); axes[0, 0].set_title('Forward: Position'); axes[0, 0].set_ylabel('Position'); axes[0, 0].set_ylim(-6, 6)
-        axes[0, 1].plot(ts_cpu, reverse_sde_paths[:n_plot, :, 0].T, lw=1.5, alpha=0.5); axes[0, 1].set_ylim(-6, 6)
-        #axes[0, 1].plot(ts_cpu, reverse_ode_paths[:n_plot, :, 0].T, lw=1.0, alpha=0.8, color='green')
+        # --- Position Plots ---
+        # Forward trajectories
+        axes[0, 0].plot(ts_cpu, forward_paths[10:, :, 0].T, lw=1.5, color='darkblue', alpha=0.05)
+        axes[0, 0].plot(ts_cpu, forward_paths[:10, :, 0].T, lw=1.5, color='darkblue', alpha=1.0)
+        axes[0, 0].set_title('Forward: Position')
+        axes[0, 0].set_ylabel('Position')
+        axes[0, 0].set_ylim(-6, 6)
+
+        # Reverse trajectories
+        axes[0, 1].plot(ts_cpu, reverse_sde_paths[10:n_plot, :, 0].T, lw=1.5, color='darkblue', alpha=0.05)
+        axes[0, 1].plot(ts_cpu, reverse_sde_paths[:10, :, 0].T, lw=1.5, color='darkblue', alpha=1.0)
         axes[0, 1].set_title('Reverse: Position')
+        axes[0, 1].set_ylim(-6, 6)
 
+        # Final distribution
         plot_position_dist(reverse_sde_paths[:, 0, 0], self.gmm_params, axes[0, 2])
-        axes[0, 2].set_xlim(-6, 6)
-        #axes[0, 2].hist(reverse_ode_paths[:, 0, 0], bins=50, density=True, alpha=0.6, color='green')
         axes[0, 2].set_title("Final Position Distribution")
+        axes[0, 2].set_xlim(-6, 6)
 
-        axes[1, 0].plot(ts_cpu, forward_paths[:, :, 1].T, lw=1.5); axes[1, 0].set_title('Forward: Momentum'); axes[1, 0].set_xlabel('Time'); axes[1, 0].set_ylabel('Momentum'); axes[1, 0].set_ylim(-6, 6)
-        axes[1, 1].plot(ts_cpu, reverse_sde_paths[:n_plot, :, 1].T, lw=1.5, alpha=0.5)
-        #axes[1, 1].plot(ts_cpu, reverse_ode_paths[:n_plot, :, 1].T, lw=1.0, alpha=0.8, color='green')
-        axes[1, 1].set_title('Reverse: Momentum'); axes[1, 1].set_xlabel('Time'); axes[1, 1].set_ylim(-6, 6)
+        # --- Momentum Plots ---
+        # Forward trajectories
+        axes[1, 0].plot(ts_cpu, forward_paths[10:, :, 1].T, lw=1.5, color='darkblue', alpha=0.05)
+        axes[1, 0].plot(ts_cpu, forward_paths[:10, :, 1].T, lw=1.5, color='darkblue', alpha=1.0)
+        axes[1, 0].set_title('Forward: Momentum')
+        axes[1, 0].set_xlabel('Time')
+        axes[1, 0].set_ylabel('Momentum')
+        axes[1, 0].set_ylim(-6, 6)
+
+        # Reverse trajectories
+        axes[1, 1].plot(ts_cpu, reverse_sde_paths[10:n_plot, :, 1].T, lw=1.5, color='darkblue', alpha=0.05)
+        axes[1, 1].plot(ts_cpu, reverse_sde_paths[:10, :, 1].T, lw=1.5, color='darkblue', alpha=1.0)
+        axes[1, 1].set_title('Reverse: Momentum')
+        axes[1, 1].set_xlabel('Time')
+        axes[1, 1].set_ylim(-6, 6)
         
+        # Final distribution
         plot_aux_dist(axes[1, 2], (reverse_sde_paths[:, 0, 1], 'Momentum'), target_dist=(0, np.sqrt(self.v_init_var)))
-        #axes[1, 2].hist(reverse_ode_paths[:, 0, 1], bins=50, density=True, alpha=0.6, color='green')
-        axes[1, 2].set_title("Final Momentum Distribution"); axes[1, 2].set_xlim(-4, 4)
+        axes[1, 2].set_title("Final Momentum Distribution")
+        axes[1, 2].set_xlim(-4, 4)
         
-        plt.tight_layout(rect=[0, 0, 1, 0.96]); plt.show()
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        plt.show()
