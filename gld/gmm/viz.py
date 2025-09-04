@@ -10,14 +10,14 @@ def plot_position_dist(generated_samples, gmm_params, ax):
         true_pdf += w.cpu().numpy() * (1 / (s.cpu().numpy() * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x_range - m.cpu().numpy()) / s.cpu().numpy())**2)
     
     ax.plot(x_range, true_pdf, 'r--', lw=2, label=r'Target $p_0(x)$')
-    ax.hist(generated_samples, bins=60, density=True, alpha=0.75, label='Generated Samples')
+    ax.hist(generated_samples, bins=100, density=True, alpha=0.75, label='Generated Samples')
     ax.set_title('Final Position Distribution'); ax.set_xlabel('Position x'); ax.set_ylabel('Density'); ax.legend()
 
 def plot_aux_dist(ax, *args, target_dist=None):
     """Plots one or more auxiliary distributions (e.g., momentum) on the same axes."""
     colors = plt.cm.viridis(np.linspace(0, 0.8, len(args)))
     for i, (data, label) in enumerate(args):
-        ax.hist(data, bins=60, density=True, alpha=0.6, label=f'Final {label}', color=colors[i])
+        ax.hist(data, bins=100, density=True, alpha=0.6, label=f'Final {label}', color=colors[i])
     if target_dist is not None:
         mean, std = target_dist
         x_min, x_max = ax.get_xlim()

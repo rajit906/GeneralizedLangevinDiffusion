@@ -4,7 +4,7 @@ DEVICE = torch.device("cpu")
 
 class DiffusionModel(ABC):
     """Abstract base class for diffusion models using PyTorch."""
-    def __init__(self, name, gmm_params, T=1.0, n_steps=500):
+    def __init__(self, name, gmm_params, T=1.0, n_steps=1000):
         self.name = name
         self.gmm_params = {k: torch.tensor(v, device=DEVICE, dtype=torch.float32) for k, v in gmm_params.items()}
         self.T = T

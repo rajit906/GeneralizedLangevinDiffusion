@@ -17,9 +17,9 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
     def __init__(self, gmm_params, **kwargs):
         super().__init__('Generalized Langevin Diffusion', gmm_params, **kwargs)
         # --- Model Parameters ---
-        self.gamma = 5.86961215
-        self.c = 0.9999
-        self.lambda_val = 7.48351271
+        self.gamma = 2.
+        self.c = 0.#5
+        self.lambda_val = 1.
         self.M = 1.
         self.M_inv = 1. / self.M
         self.beta = 8. * np.sqrt(self.M)
@@ -41,41 +41,13 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
 
         self.G = np.sqrt(2 * self.beta) * self.B
         self.GGt = self.G @ self.G.T
-        self.perturbation_cache = {}
-        self.precompute()
+        self.A_np = self.A.cpu().numpy()
+        self.G_np = self.G.cpu().numpy()
+        self.C_np = stationary_covariance(self.beta, self.A_np, self.G_np)
 
     def precompute(self):
-        """
-        Precomputes the evolution of each GMM component's mean and covariance over time
-        by calling the accurate analytical solver from matrix_exp.py.
-        """
-        n_components = len(self.gmm_params['weights'])
-        A_np = self.A.cpu().numpy()
-        G_np = self.G.cpu().numpy()
-        ts_np = self.ts.cpu().numpy()
-        C_np = stationary_covariance(self.beta, A_np, G_np)
-
-        for t_idx, t in enumerate(ts_np):
-            means_k = []
-            covs_k = []
-            for k in range(n_components):
-                mu0_k_np = np.array([self.gmm_params['means'][k], 0, 0])
-                Sigma0_k_np = np.diag([
-                    self.gmm_params['stds'][k]**2, self.p_init_var, self.s_init_var
-                ])
-
-                mu_t_np, Sigma_t_np = compute_mean_and_covariance(
-                    t, self.beta, A_np, G_np, mu0_k_np, Sigma0_k_np, C_np
-                )
-                mu_t = torch.from_numpy(mu_t_np).float().to(DEVICE)
-                Sigma_t = torch.from_numpy(Sigma_t_np).float().to(DEVICE)
-                means_k.append(mu_t)
-                covs_k.append(Sigma_t)
-            self.perturbation_cache[t_idx] = {
-                'weights': self.gmm_params['weights'],
-                'means': means_k,
-                'covs': covs_k,
-            }
+        """Method is required by the abstract base class, but we do nothing here."""
+        pass
 
     def solve_forward_sde_em(self, z0):
         """Solves the forward SDE dz = -beta * A * z * dt + G * dW using Euler-Maruyama."""
@@ -127,29 +99,94 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
 
 
 
-    def _get_perturbed_params(self, t_idx):
+    def _get_perturbed_params(self, t):
         """
-        Retrieves the precomputed GMM parameters (weights, means, covs) for a given time step.
+        Computes the GMM parameters (weights, means, covs) for a given time t.
         """
-        cached_params = self.perturbation_cache[t_idx]
-        return cached_params['weights'], cached_params['means'], cached_params['covs']
+        n_components = len(self.gmm_params['weights'])
+        means_k = []
+        covs_k = []
+
+        for k in range(n_components):
+            mu0_k_np = np.array([self.gmm_params['means'][k], 0, 0])
+            Sigma0_k_np = np.diag([
+                self.gmm_params['stds'][k]**2, self.p_init_var, self.s_init_var
+            ])
+
+            mu_t_np, Sigma_t_np = compute_mean_and_covariance(
+                t, self.beta, self.A_np, self.G_np, mu0_k_np, Sigma0_k_np, self.C_np
+            )
+            mu_t = torch.from_numpy(mu_t_np).float().to(DEVICE)
+            Sigma_t = torch.from_numpy(Sigma_t_np).float().to(DEVICE)
+            means_k.append(mu_t)
+            covs_k.append(Sigma_t)
+            
+        return self.gmm_params['weights'], means_k, covs_k
     
+
     def _score_fn(self, z, t_idx):
         """
-        Computes the marginal score \nabla_z log p_t(z) for the GMM analytically.
+        Computes the marginal score \nabla_z log p_t(z) for the GMM analytically
+        in a vectorized fashion, without using MultivariateNormal or linalg.solve.
         """
-        weights, means_k, covs_k = self._get_perturbed_params(t_idx)
-        batch_size = z.shape[0]
-        p_t_z = torch.zeros(batch_size, device=DEVICE)
-        grad_v_p_t_z = torch.zeros(batch_size, 3, device=DEVICE)
-        for w, mean, cov in zip(weights, means_k, covs_k):
-            stable_cov = cov + 1e-6 * torch.eye(3, device=DEVICE)
-            dist_3d = torch.distributions.MultivariateNormal(mean, stable_cov)
-            pdf = torch.exp(dist_3d.log_prob(z))
-            score = -torch.linalg.solve(stable_cov, (z - mean).T).T
-            p_t_z += w * pdf
-            grad_v_p_t_z += (w * pdf).unsqueeze(1) * score
+        t = self.ts[t_idx].item()
+        # _get_perturbed_params returns the weights tensor, and lists of mean and cov tensors
+        weights, means_k, covs_k = self._get_perturbed_params(t)
+
+        # --- 1. Pre-process inputs for vectorization ---
+        # Stack the lists of mean and covariance tensors into single batched tensors.
+        # K is the number of GMM components.
+        means = torch.stack(means_k) # Shape: (K, 3)
+        covs = torch.stack(covs_k)   # Shape: (K, 3, 3)
+
+        # N is the batch size of the input z; d is the dimension.
+        N, d = z.shape[0], z.shape[1]
+
+        # --- 2. Manually compute PDF components ---
+        # Add a small identity matrix for numerical stability before inverting.
+        # The .unsqueeze(0) allows it to broadcast across all K components.
+        stable_covs = covs + 1e-6 * torch.eye(d, device=DEVICE).unsqueeze(0)
+        
+        # Compute inverses and log-determinants for all K components at once.
+        cov_invs = torch.linalg.inv(stable_covs) # Shape: (K, 3, 3)
+        log_dets = torch.linalg.slogdet(stable_covs)[1] # Shape: (K,)
+
+        # Prepare tensors for broadcasting over N data points and K components.
+        z_expanded = z.unsqueeze(1) # Shape: (N, 1, 3)
+        
+        # Calculate the difference vector (z - mu) for all N x K pairs.
+        diff = z_expanded - means # Shape: (N, K, 3) via broadcasting
+
+        # --- CORRECTED MAHALANOBIS TERM CALCULATION ---
+        # Calculate the Mahalanobis distance squared: (z-mu)^T * Sigma_inv * (z-mu).
+        # This is done by first performing the matrix-vector product, then the dot product.
+        mat_vec_prod = torch.matmul(cov_invs, diff.unsqueeze(-1)).squeeze(-1)
+        mahalanobis_term = torch.sum(diff * mat_vec_prod, dim=-1) # Shape: (N, K)
+        
+        # Calculate the log PDF for each point under each GMM component.
+        log_2pi = d * np.log(2 * np.pi)
+        log_pdfs = -0.5 * (log_2pi + log_dets + mahalanobis_term) # Shape: (N, K)
+        
+        # Convert from log-space to get the actual PDF values.
+        pdfs = torch.exp(log_pdfs)
+
+        # --- 3. Compute the final score ---
+        # Weight the PDFs by their corresponding GMM component weights.
+        weighted_pdfs = pdfs * weights # Shape: (N, K)
+        
+        # The marginal probability p(z) is the sum over all weighted components.
+        p_t_z = torch.sum(weighted_pdfs, dim=1) # Shape: (N,)
+
+        # The score for a single component is -Sigma_inv * (z-mu).
+        # We can reuse the matrix-vector product from before.
+        per_component_scores = -mat_vec_prod # Shape: (N, K, 3)
+
+        # The numerator of the final score is the sum of component scores, each weighted by its PDF contribution.
+        grad_v_p_t_z = torch.sum(weighted_pdfs.unsqueeze(-1) * per_component_scores, dim=1) # Shape: (N, 3)
+
+        # The final score is the gradient of the log-probability: (\nabla p(z)) / p(z).
         final_score_3d = grad_v_p_t_z / (p_t_z.unsqueeze(1) + 1e-8)
+        
         return final_score_3d
 
     def solve_reverse_sde_em(self, zT):
@@ -351,13 +388,13 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
             axes[i, 0].plot(ts_cpu, forward_sde_paths[:10, :, i].T, lw=1.5, alpha=1, color='darkblue')
             axes[i, 0].set_title(f'Forward: {var_names[i]}')
             axes[i, 0].set_ylabel(var_names[i])
-            axes[i, 0].set_ylim(-6, 6)
+            axes[i, 0].set_ylim(-60, 60)
 
             # Reverse trajectories
             axes[i, 1].plot(ts_cpu, reverse_sde_paths[10:n_plot, :, i].T, lw=1.5, alpha=0.05, color='darkblue')
             axes[i, 1].plot(ts_cpu, reverse_sde_paths[:10, :, i].T, lw=1.5, alpha=1, color='darkblue')
             axes[i, 1].set_title(f'Reverse: {var_names[i]}')
-            axes[i, 1].set_ylim(-6, 6)
+            axes[i, 1].set_ylim(-60, 60)
 
             if i == 2:
                 axes[i, 0].set_xlabel('Time')
@@ -370,24 +407,24 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         momentum_data = reverse_sde_paths[:, 0, 1]
         memory_data  = reverse_sde_paths[:, 0, 2]
 
-        position_filtered = position_data[np.abs(position_data) <= 1000]
-        momentum_filtered = momentum_data[np.abs(momentum_data) <= 1000]
-        memory_filtered   = memory_data[np.abs(memory_data) <= 1000]
+        position_filtered = position_data#[np.abs(position_data) <= 1000]
+        momentum_filtered = momentum_data#[np.abs(momentum_data) <= 1000]
+        memory_filtered   = memory_data#[np.abs(memory_data) <= 1000]
 
         # Call plotting functions without the 'color' argument to fix the TypeError
         plot_position_dist(position_filtered, self.gmm_params, axes[0, 2])
         axes[0, 2].set_title("Final Position Distribution (Reverse)")
-        axes[0, 2].set_xlim(-6, 6)
+        axes[0, 2].set_xlim(-60, 60)
 
         plot_aux_dist(axes[1, 2], (momentum_filtered, 'Momentum'),
                     target_dist=(0, np.sqrt(self.p_init_var)))
         axes[1, 2].set_title("Final Momentum Distribution (Reverse)")
-        axes[1, 2].set_xlim(-4, 4)
+        axes[1, 2].set_xlim(-60, 60)
 
         plot_aux_dist(axes[2, 2], (memory_filtered, 'Memory'),
                     target_dist=(0, np.sqrt(self.s_init_var)))
         axes[2, 2].set_title("Final Memory Distribution (Reverse)")
-        axes[2, 2].set_xlim(-4, 4)
+        axes[2, 2].set_xlim(-60, 60)
 
         # # === [FIXED] Forward terminal histograms vs. truth (col 4) ===
         # terminal_params = self.perturbation_cache[self.n_steps - 1]
