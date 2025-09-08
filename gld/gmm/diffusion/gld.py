@@ -14,12 +14,13 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
     The state vector is z = [x, p, s], representing position, momentum, and an auxiliary variable.
     Forward SDE: dz = -beta * A * z * dt + G * dW
     """
-    def __init__(self, gmm_params, **kwargs):
+    def __init__(self, gmm_params, inttype= 'em', gamma=1.0,lambda_val=1.0, c_val = 0.0, M=1.0, **kwargs):
         super().__init__('Generalized Langevin Diffusion', gmm_params, **kwargs)
         # --- Model Parameters ---
-        self.gamma = 2.
-        self.c = 0.#5
-        self.lambda_val = 1.
+        self.inttype = inttype
+        self.gamma = gamma
+        self.c = c_val
+        self.lambda_val = lambda_val
         self.M = 1.
         self.M_inv = 1. / self.M
         self.beta = 8. * np.sqrt(self.M)
@@ -27,11 +28,19 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         self.p_init_var = 1.#0.01 * self.M
         self.s_init_var = 1.#0.04
 
-        self.A = torch.tensor([
+        self.AH = torch.tensor([
             [0., -self.M_inv, 0.],
-            [1., self.M_inv * self.gamma**2, self.gamma * self.lambda_val * self.c],
+            [1., 0.,0.],
+            [0., 0.,0.]
+        ], dtype=torch.float32, device=DEVICE)
+        
+        self.AGamma = torch.tensor([
+            [0., 0., 0.],
+            [0., self.M_inv * self.gamma**2, self.gamma * self.lambda_val * self.c],
             [0., self.gamma * self.lambda_val * self.c, self.lambda_val**2]
         ], dtype=torch.float32, device=DEVICE)
+        
+        self.A = self.AH + self.AGamma
 
         self.B = torch.tensor([
             [0., 0., 0.],
@@ -44,6 +53,21 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         self.A_np = self.A.cpu().numpy()
         self.G_np = self.G.cpu().numpy()
         self.C_np = stationary_covariance(self.beta, self.A_np, self.G_np)
+        
+        
+        dt = self.dt.item()
+        self.AH_np = self.AH.cpu().numpy()
+        self.AGamma_np = self.AGamma.cpu().numpy()
+        self.F_half_np = scipy.linalg.expm( self.beta * (self.AH_np-self.AGamma_np) * dt/2)
+        self.Ft_half_np = scipy.linalg.expm(self.beta * (2*self.AGamma_np) * dt/2)
+        #print("F_half_np = ", self.F_half_np)
+        self.S_half_np = np.linalg.cholesky(np.eye(3) - self.F_half_np @ self.F_half_np.T)
+        #self.St_half_np = np.linalg.cholesky(np.eye(3) - self.Ft_half_np @ self.Ft_half_np.T)
+        #self.L_half_np = np.linalg.cholesky(Sigma_np + 1e-9 * np.eye(3))
+
+        # self.F_half = torch.from_numpy(F_half_np).float().to(DEVICE)
+        # self.L_half = torch.from_numpy(L_half_np).float().to(DEVICE)
+        
 
     def precompute(self):
         """Method is required by the abstract base class, but we do nothing here."""
@@ -221,7 +245,8 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         dt_half = (self.dt / 2).item()
         
         F_O = -self.beta * A_O
-        exp_FO_half_np = scipy.linalg.expm(-F_O * dt_half)
+        self.F_O = F_O
+        exp_FO_half_np = scipy.linalg.expm(F_O * dt_half)
         self.exp_FO_half = torch.from_numpy(exp_FO_half_np).float().to(DEVICE)
         C_O = stationary_covariance(self.beta, A_O, self.G.cpu().numpy())
         _, Sigma_OU_half_np = compute_mean_and_covariance(dt_half, self.beta, A_O, self.G.cpu().numpy(), mu_0=np.zeros(3), Sigma_0=np.zeros((3, 3)), C=C_O)
@@ -253,9 +278,11 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
             noise1 = (self.L_OU_half @ torch.randn_like(z1).T).T
             z2 = z2_drift + noise1
 
-            # --- Step 3: Score Full-Step (S for dt) ---
+            # --- Step 3: Score Full-Euler-Step (S for dt) ---
             score_old = self._score_fn(z2, t_idx)
-            score_drift_old = (self.GGt @ score_old.T).T
+            #print((score_old.T).size())
+            #print((z2.T).size())
+            score_drift_old = (self.GGt @ (score_old.T + z2.T)).T
             z3 = z2 + score_drift_old * self.dt
 
             # --- Step 4: Ornstein-Uhlenbeck Half-Step (A_O for dt/2) ---
@@ -316,8 +343,117 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
             zs[:, i+1, :] = z_next
 
         return zs
+    
+    def precompute_sscs2(self):
 
+        self.F_half = torch.from_numpy(self.F_half_np).float().to(DEVICE)
+        self.S_half = torch.from_numpy(self.S_half_np).float().to(DEVICE)
+   
+    def solve_reverse_sde_sscs2(self, zT):
+        """
+        Solves the reverse SDE using a symmetric splitting integrator:
+        A_H(dt/2) -> A_O(dt/2) -> S(dt) -> A_O(dt/2) -> A_H(dt/2)
+        """
+        zs = torch.zeros_like(zT).unsqueeze(1).repeat(1, self.n_steps, 1)
+        zs[:, -1, :] = zT
+        
+        dt_half = self.dt / 2.0
 
+        for i in range(self.n_steps - 1, 0, -1):
+            z1 = zs[:, i, :]
+            t_idx = i
+
+            # --- Step 1: Hamiltonian Half-Step (A_H for dt/2) ---
+            # x, p, s = z.split(1, dim=-1)
+            # p1 = p + (self.beta * x) * dt_half
+            # x1 = x - (self.beta * self.M_inv * p1) * dt_half
+            # z1 = torch.cat([x1, p1, s], dim=-1)
+
+            # --- Step 2: Ornstein-Uhlenbeck Half-Step (A_O for dt/2) ---
+            # Apply pre-computed drift and diffusion
+            z2_drift = (self.F_half  @ z1.T).T
+            noise1 = (self.S_half @ torch.randn_like(z1).T).T
+            z2 = z2_drift + noise1
+
+            # # --- Step 3: Score Full-Euler-Step (S for dt) ---
+            score_old = self._score_fn(z2, t_idx)
+            # #print((score_old.T).size())
+            # #print((z2.T).size())
+            score_drift_old = (self.GGt @ (score_old.T + z2.T)).T
+            z3 = z2 + score_drift_old * self.dt
+            # z3 = z2
+            # --- Step 4: Ornstein-Uhlenbeck Half-Step (A_O for dt/2) ---
+            z4_drift = (self.F_half @ z3.T).T
+            noise2 = (self.S_half @ torch.randn_like(z3).T).T
+            z4 = z4_drift + noise2
+
+            # --- Step 5: Hamiltonian Half-Step (A_H for dt/2, symmetric) ---
+            # x4, p4, s4 = z4.split(1, dim=-1)
+            # x5 = x4 - (self.beta * self.M_inv * p4) * dt_half
+            # p5 = p4 + (self.beta * x5) * dt_half
+            # z_next = torch.cat([x5, p5, s4], dim=-1)
+            
+            zs[:, i-1, :] = z4
+
+        return zs
+    
+    def precompute_sscs3(self):
+        self.F_half = torch.from_numpy(self.F_half_np).float().to(DEVICE)
+        self.S_half = torch.from_numpy(self.S_half_np).float().to(DEVICE)
+        self.Ft_half = torch.from_numpy(self.Ft_half_np).float().to(DEVICE)
+   
+    def solve_reverse_sde_sscs3(self, zT):
+        """
+        Solves the reverse SDE using a symmetric splitting integrator:
+        (At_H(dt/2) + At_O(dt/2)) -> S(dt) -> (At_O(dt/2) + At_H(dt/2))
+        """
+        zs = torch.zeros_like(zT).unsqueeze(1).repeat(1, self.n_steps, 1)
+        zs[:, -1, :] = zT
+        
+        dt_half = self.dt / 2.0
+
+        for i in range(self.n_steps - 1, 0, -1):
+            z1 = zs[:, i, :]
+            t_idx = i
+
+            # --- Step 1: Hamiltonian Half-Step (A_H for dt/2) ---
+            # x, p, s = z.split(1, dim=-1)
+            # p1 = p + (self.beta * x) * dt_half
+            # x1 = x - (self.beta * self.M_inv * p1) * dt_half
+            # z1 = torch.cat([x1, p1, s], dim=-1)
+
+            # --- Step 2: Ornstein-Uhlenbeck Half-Step (A_O for dt/2) ---
+            # Apply pre-computed drift and diffusion
+            z2_drift = (self.F_half  @ z1.T).T
+            noise1 = (self.S_half @ torch.randn_like(z1).T).T
+            z2 = z2_drift + noise1
+
+            z2t = (self.Ft_half @ z2.T).T
+            
+            # # --- Step 3: Score Full-Euler-Step (S for dt) ---
+            score_old = self._score_fn(z2t, t_idx)
+            # #print((score_old.T).size())
+            # #print((z2.T).size())
+            score_drift_old = (self.GGt @ score_old.T).T
+            z3 = z2t + score_drift_old * self.dt
+            
+            z3t = (self.Ft_half @ z3.T).T
+            # z3 = z2
+            # --- Step 4: Ornstein-Uhlenbeck Half-Step (A_O for dt/2) ---
+            z4_drift = (self.F_half @ z3t.T).T
+            noise2 = (self.S_half @ torch.randn_like(z3t).T).T
+            z4 = z4_drift + noise2
+
+            # --- Step 5: Hamiltonian Half-Step (A_H for dt/2, symmetric) ---
+            # x4, p4, s4 = z4.split(1, dim=-1)
+            # x5 = x4 - (self.beta * self.M_inv * p4) * dt_half
+            # p5 = p4 + (self.beta * x5) * dt_half
+            # z_next = torch.cat([x5, p5, s4], dim=-1)
+            
+            zs[:, i-1, :] = z4
+
+        return zs
+    
     def solve_reverse_sde_ubu(self, zT):
         return None
     
@@ -327,6 +463,12 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         elif type == 'sscs':
             self.precompute_sscs()
             return self.solve_reverse_sde_sscs(zT)
+        elif type == 'sscs2':
+            self.precompute_sscs2()
+            return self.solve_reverse_sde_sscs2(zT)
+        elif type == 'sscs3':
+            self.precompute_sscs3()
+            return self.solve_reverse_sde_sscs3(zT)
         elif type == 'ubu':
             return self.solve_reverse_sde_ubu(zT)
         
@@ -375,7 +517,7 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         pT_hist = torch.randn(n_hist, device=DEVICE) * np.sqrt(self.M)
         sT_hist = torch.randn(n_hist, device=DEVICE)
         zT_hist = torch.stack([xT_hist, pT_hist, sT_hist], dim=1)
-        reverse_sde_paths = self.solve_reverse_sde(zT_hist, type='sscs').cpu().numpy()
+        reverse_sde_paths = self.solve_reverse_sde(zT_hist, type=self.inttype).cpu().numpy()
 
         fig, axes = plt.subplots(3, 3, figsize=(18, 15))
         fig.suptitle(f'{self.name} Demonstration', fontsize=16)
@@ -388,13 +530,13 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
             axes[i, 0].plot(ts_cpu, forward_sde_paths[:10, :, i].T, lw=1.5, alpha=1, color='darkblue')
             axes[i, 0].set_title(f'Forward: {var_names[i]}')
             axes[i, 0].set_ylabel(var_names[i])
-            axes[i, 0].set_ylim(-60, 60)
+            axes[i, 0].set_ylim(-6, 6)
 
             # Reverse trajectories
             axes[i, 1].plot(ts_cpu, reverse_sde_paths[10:n_plot, :, i].T, lw=1.5, alpha=0.05, color='darkblue')
             axes[i, 1].plot(ts_cpu, reverse_sde_paths[:10, :, i].T, lw=1.5, alpha=1, color='darkblue')
             axes[i, 1].set_title(f'Reverse: {var_names[i]}')
-            axes[i, 1].set_ylim(-60, 60)
+            axes[i, 1].set_ylim(-6, 6)
 
             if i == 2:
                 axes[i, 0].set_xlabel('Time')
@@ -414,17 +556,17 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         # Call plotting functions without the 'color' argument to fix the TypeError
         plot_position_dist(position_filtered, self.gmm_params, axes[0, 2])
         axes[0, 2].set_title("Final Position Distribution (Reverse)")
-        axes[0, 2].set_xlim(-60, 60)
+        axes[0, 2].set_xlim(-10, 10)
 
         plot_aux_dist(axes[1, 2], (momentum_filtered, 'Momentum'),
                     target_dist=(0, np.sqrt(self.p_init_var)))
         axes[1, 2].set_title("Final Momentum Distribution (Reverse)")
-        axes[1, 2].set_xlim(-60, 60)
+        axes[1, 2].set_xlim(-6, 6)
 
         plot_aux_dist(axes[2, 2], (memory_filtered, 'Memory'),
                     target_dist=(0, np.sqrt(self.s_init_var)))
         axes[2, 2].set_title("Final Memory Distribution (Reverse)")
-        axes[2, 2].set_xlim(-60, 60)
+        axes[2, 2].set_xlim(-6, 6)
 
         # # === [FIXED] Forward terminal histograms vs. truth (col 4) ===
         # terminal_params = self.perturbation_cache[self.n_steps - 1]
@@ -477,3 +619,4 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
 
         plt.tight_layout(rect=[0, 0, 1, 0.96])
         plt.show()
+        return reverse_sde_paths
