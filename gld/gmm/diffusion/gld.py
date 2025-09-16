@@ -17,10 +17,10 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
     def __init__(self, gmm_params, **kwargs):
         super().__init__('Generalized Langevin Diffusion', gmm_params, **kwargs)
         # --- Model Parameters ---
-        self.gamma = 2.
-        self.c = 0.#5
+        self.gamma = 1.
+        self.c = 0.75
         self.lambda_val = 1.
-        self.M = 1.
+        self.M = self.gamma / 4 # Critical Damping
         self.M_inv = 1. / self.M
         self.beta = 8. * np.sqrt(self.M)
 
@@ -132,61 +132,24 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         t = self.ts[t_idx].item()
         # _get_perturbed_params returns the weights tensor, and lists of mean and cov tensors
         weights, means_k, covs_k = self._get_perturbed_params(t)
-
-        # --- 1. Pre-process inputs for vectorization ---
-        # Stack the lists of mean and covariance tensors into single batched tensors.
-        # K is the number of GMM components.
         means = torch.stack(means_k) # Shape: (K, 3)
         covs = torch.stack(covs_k)   # Shape: (K, 3, 3)
-
-        # N is the batch size of the input z; d is the dimension.
         N, d = z.shape[0], z.shape[1]
-
-        # --- 2. Manually compute PDF components ---
-        # Add a small identity matrix for numerical stability before inverting.
-        # The .unsqueeze(0) allows it to broadcast across all K components.
         stable_covs = covs + 1e-6 * torch.eye(d, device=DEVICE).unsqueeze(0)
-        
-        # Compute inverses and log-determinants for all K components at once.
         cov_invs = torch.linalg.inv(stable_covs) # Shape: (K, 3, 3)
         log_dets = torch.linalg.slogdet(stable_covs)[1] # Shape: (K,)
-
-        # Prepare tensors for broadcasting over N data points and K components.
         z_expanded = z.unsqueeze(1) # Shape: (N, 1, 3)
-        
-        # Calculate the difference vector (z - mu) for all N x K pairs.
         diff = z_expanded - means # Shape: (N, K, 3) via broadcasting
-
-        # --- CORRECTED MAHALANOBIS TERM CALCULATION ---
-        # Calculate the Mahalanobis distance squared: (z-mu)^T * Sigma_inv * (z-mu).
-        # This is done by first performing the matrix-vector product, then the dot product.
         mat_vec_prod = torch.matmul(cov_invs, diff.unsqueeze(-1)).squeeze(-1)
         mahalanobis_term = torch.sum(diff * mat_vec_prod, dim=-1) # Shape: (N, K)
-        
-        # Calculate the log PDF for each point under each GMM component.
         log_2pi = d * np.log(2 * np.pi)
         log_pdfs = -0.5 * (log_2pi + log_dets + mahalanobis_term) # Shape: (N, K)
-        
-        # Convert from log-space to get the actual PDF values.
         pdfs = torch.exp(log_pdfs)
-
-        # --- 3. Compute the final score ---
-        # Weight the PDFs by their corresponding GMM component weights.
         weighted_pdfs = pdfs * weights # Shape: (N, K)
-        
-        # The marginal probability p(z) is the sum over all weighted components.
         p_t_z = torch.sum(weighted_pdfs, dim=1) # Shape: (N,)
-
-        # The score for a single component is -Sigma_inv * (z-mu).
-        # We can reuse the matrix-vector product from before.
         per_component_scores = -mat_vec_prod # Shape: (N, K, 3)
-
-        # The numerator of the final score is the sum of component scores, each weighted by its PDF contribution.
         grad_v_p_t_z = torch.sum(weighted_pdfs.unsqueeze(-1) * per_component_scores, dim=1) # Shape: (N, 3)
-
-        # The final score is the gradient of the log-probability: (\nabla p(z)) / p(z).
         final_score_3d = grad_v_p_t_z / (p_t_z.unsqueeze(1) + 1e-8)
-        
         return final_score_3d
 
     def solve_reverse_sde_em(self, zT):
@@ -388,13 +351,13 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
             axes[i, 0].plot(ts_cpu, forward_sde_paths[:10, :, i].T, lw=1.5, alpha=1, color='darkblue')
             axes[i, 0].set_title(f'Forward: {var_names[i]}')
             axes[i, 0].set_ylabel(var_names[i])
-            axes[i, 0].set_ylim(-60, 60)
+            #axes[i, 0].set_ylim(-60, 60)
 
             # Reverse trajectories
             axes[i, 1].plot(ts_cpu, reverse_sde_paths[10:n_plot, :, i].T, lw=1.5, alpha=0.05, color='darkblue')
             axes[i, 1].plot(ts_cpu, reverse_sde_paths[:10, :, i].T, lw=1.5, alpha=1, color='darkblue')
             axes[i, 1].set_title(f'Reverse: {var_names[i]}')
-            axes[i, 1].set_ylim(-60, 60)
+            #axes[i, 1].set_ylim(-60, 60)
 
             if i == 2:
                 axes[i, 0].set_xlabel('Time')
@@ -407,24 +370,24 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         momentum_data = reverse_sde_paths[:, 0, 1]
         memory_data  = reverse_sde_paths[:, 0, 2]
 
-        position_filtered = position_data#[np.abs(position_data) <= 1000]
-        momentum_filtered = momentum_data#[np.abs(momentum_data) <= 1000]
-        memory_filtered   = memory_data#[np.abs(memory_data) <= 1000]
+        position_filtered = position_data[np.abs(position_data) <= 100]
+        momentum_filtered = momentum_data[np.abs(momentum_data) <= 100]
+        memory_filtered   = memory_data[np.abs(memory_data) <= 100]
 
         # Call plotting functions without the 'color' argument to fix the TypeError
         plot_position_dist(position_filtered, self.gmm_params, axes[0, 2])
         axes[0, 2].set_title("Final Position Distribution (Reverse)")
-        axes[0, 2].set_xlim(-60, 60)
+        #axes[0, 2].set_xlim(-60, 60)
 
         plot_aux_dist(axes[1, 2], (momentum_filtered, 'Momentum'),
                     target_dist=(0, np.sqrt(self.p_init_var)))
         axes[1, 2].set_title("Final Momentum Distribution (Reverse)")
-        axes[1, 2].set_xlim(-60, 60)
+        #axes[1, 2].set_xlim(-60, 60)
 
         plot_aux_dist(axes[2, 2], (memory_filtered, 'Memory'),
                     target_dist=(0, np.sqrt(self.s_init_var)))
         axes[2, 2].set_title("Final Memory Distribution (Reverse)")
-        axes[2, 2].set_xlim(-60, 60)
+        #axes[2, 2].set_xlim(-60, 60)
 
         # # === [FIXED] Forward terminal histograms vs. truth (col 4) ===
         # terminal_params = self.perturbation_cache[self.n_steps - 1]

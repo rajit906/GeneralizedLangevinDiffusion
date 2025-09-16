@@ -4,7 +4,7 @@ plt.style.use('seaborn-v0_8-whitegrid')
 # --- Plotting Helper Functions ---
 def plot_position_dist(generated_samples, gmm_params, ax):
     """Plots the final position distribution against the true GMM PDF."""
-    x_range = np.linspace(-8, 8, 400)
+    x_range = np.linspace(-np.min(generated_samples), np.max(generated_samples), 400)
     true_pdf = np.zeros_like(x_range)
     for w, m, s in zip(gmm_params['weights'], gmm_params['means'], gmm_params['stds']):
         true_pdf += w.cpu().numpy() * (1 / (s.cpu().numpy() * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x_range - m.cpu().numpy()) / s.cpu().numpy())**2)

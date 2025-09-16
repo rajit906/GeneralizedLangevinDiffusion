@@ -16,8 +16,8 @@ DEVICE = torch.device("cpu")
 class CriticallyDampedLangevin(DiffusionModel):
     """Implements Critically Damped Langevin Diffusion (CLD)."""
     def __init__(self, gmm_params, **kwargs):
-        self.M = 1.
-        self.Gamma = 2.0
+        self.M = 0.25
+        self.Gamma = 1.
         self.beta = 8.0 * np.sqrt(self.M)
         self.gamma_init = 1.
         v_init_var = self.gamma_init * self.M
@@ -96,20 +96,61 @@ class CriticallyDampedLangevin(DiffusionModel):
 
         return weights, means_t, covs_t
 
+    # def _score_fn(self, z, t_idx):
+    #     weights, means, covs = self._get_perturbed_params(t_idx)
+    #     p_t_z = torch.zeros(z.shape[0], device=DEVICE)
+    #     grad_v_p_t_z = torch.zeros(z.shape[0], device=DEVICE)
+    #     for w, mean, cov in zip(weights, means, covs):
+    #         stable_cov = cov + 1e-6 * torch.eye(2, device=DEVICE)
+    #         dist = torch.distributions.MultivariateNormal(mean, stable_cov)
+    #         pdf = torch.exp(dist.log_prob(z))
+    #         grad_log_pdf = -torch.linalg.solve(stable_cov, (z - mean).T).T
+    #         p_t_z += w * pdf
+    #         grad_v_p_t_z += w * pdf * grad_log_pdf[:, 1]
+    #         score_full = torch.zeros_like(z)
+    #         score_full[:, 1] = grad_v_p_t_z / (p_t_z + 1e-8)
+    #     return score_full
+
     def _score_fn(self, z, t_idx):
         weights, means, covs = self._get_perturbed_params(t_idx)
-        p_t_z = torch.zeros(z.shape[0], device=DEVICE)
-        grad_v_p_t_z = torch.zeros(z.shape[0], device=DEVICE)
-        for w, mean, cov in zip(weights, means, covs):
-            stable_cov = cov + 1e-6 * torch.eye(2, device=DEVICE)
-            dist = torch.distributions.MultivariateNormal(mean, stable_cov)
-            pdf = torch.exp(dist.log_prob(z))
-            grad_log_pdf = -torch.linalg.solve(stable_cov, (z - mean).T).T
-            p_t_z += w * pdf
-            grad_v_p_t_z += w * pdf * grad_log_pdf[:, 1]
-            score_full = torch.zeros_like(z)
-            score_full[:, 1] = grad_v_p_t_z / (p_t_z + 1e-8)
+        n_batch, dim = z.shape
+        n_comp = len(weights)
+
+        # Stack mixture parameters
+        means = torch.stack(means, dim=0)        # (n_comp, dim)
+        covs = torch.stack(covs, dim=0)          # (n_comp, dim, dim)
+        covs = covs + 1e-6 * torch.eye(dim, device=DEVICE)[None]  # stabilization
+        weights = torch.as_tensor(weights, device=DEVICE)         # (n_comp,)
+
+        # Expand z to (n_batch, n_comp, dim)
+        z_exp = z[:, None, :]                     # (n_batch, 1, dim)
+        diff = z_exp - means[None, :, :]          # (n_batch, n_comp, dim)
+
+        # Precompute inverse and logdet of covariances
+        cov_inv = torch.linalg.inv(covs)          # (n_comp, dim, dim)
+        cov_logdet = torch.logdet(covs)           # (n_comp,)
+
+        # Mahalanobis distances: (n_batch, n_comp)
+        m_dist = torch.einsum("bkd,kde,bke->bk", diff, cov_inv, diff)
+        
+        # log pdfs: (n_batch, n_comp)
+        log_pdf = -0.5 * (m_dist + dim*np.log(2*np.pi) + cov_logdet[None, :])
+        pdf = torch.exp(log_pdf)                  # (n_batch, n_comp)
+
+        # Gradient of log pdf wrt z: - (cov_inv @ diff.T).T
+        grad_log_pdf = -torch.einsum("kde,bke->bkd", cov_inv, diff)  # (n_batch, n_comp, dim)
+
+        # Weighted mixture contributions
+        w_pdf = weights[None, :] * pdf            # (n_batch, n_comp)
+        p_t_z = w_pdf.sum(dim=1)                  # (n_batch,)
+        grad_v_p_t_z = (w_pdf[..., None] * grad_log_pdf)[..., 1].sum(dim=1)  # (n_batch,)
+
+        # Final score (zeros except v-component)
+        score_full = torch.zeros_like(z)          # (n_batch, dim)
+        score_full[:, 1] = grad_v_p_t_z / (p_t_z + 1e-8)
         return score_full
+
+
 
     def solve_forward_sde(self, z0):
         """Solves the forward SDE using matrix operations."""
@@ -171,6 +212,53 @@ class CriticallyDampedLangevin(DiffusionModel):
             mu_full = torch.stack([mu_x_full, mu_v_full], dim=1)
             zs[:, i-1, :] = torch.distributions.MultivariateNormal(mu_full, cov_half).sample()
         return zs
+
+    # def solve_reverse_sde_sscs(self, zT):
+    #     zs = torch.zeros(zT.shape[0], self.n_steps, 2, device=DEVICE)
+    #     zs[:, -1, :] = zT
+
+    #     M_inv = 1.0 / self.M
+    #     B_half_dt = self.beta * (self.dt.item() / 2)
+
+    #     exp_term = np.exp(-2 * B_half_dt / self.Gamma)
+    #     exp_full_dt = np.exp(4 * B_half_dt / self.Gamma)
+
+    #     cov_xx = exp_full_dt - 1 - 4*B_half_dt/self.Gamma - 8*B_half_dt**2/self.Gamma**2
+    #     cov_xv = -4 * B_half_dt**2 / self.Gamma
+    #     cov_vv = self.Gamma**2/4*(exp_full_dt-1) + B_half_dt*self.Gamma - 2*B_half_dt**2
+
+    #     cov_half_np = np.array([[cov_xx, cov_xv], [cov_xv, cov_vv]]) * np.exp(-4*B_half_dt/self.Gamma)
+    #     cov_half = torch.from_numpy(cov_half_np).float().to(DEVICE)
+
+    #     # Precompute Cholesky for reuse
+    #     chol_half = torch.linalg.cholesky(cov_half)  # (2,2)
+
+    #     for i in range(self.n_steps - 1, 0, -1):
+    #         u_n = zs[:, i, :]
+
+    #         # --- half step ---
+    #         mu_x_half = (2*B_half_dt/self.Gamma*u_n[:,0] - 4*B_half_dt/self.Gamma**2*u_n[:,1] + u_n[:,0]) * exp_term
+    #         mu_v_half = (B_half_dt*u_n[:,0] - 2*B_half_dt/self.Gamma*u_n[:,1] + u_n[:,1]) * exp_term
+    #         mu_half = torch.stack([mu_x_half, mu_v_half], dim=1)
+
+    #         eps = torch.randn_like(mu_half)  # (batch, 2)
+    #         u_half = mu_half + eps @ chol_half.T
+
+    #         score_v = self._score_fn(u_half, i)[:, 1]
+    #         v_update = self.dt * (2 * self.beta * self.Gamma * (score_v + M_inv * u_half[:,1]))
+    #         u_half_prime = u_half.clone()
+    #         u_half_prime[:, 1] += v_update
+
+    #         # --- full step ---
+    #         mu_x_full = (2*B_half_dt/self.Gamma*u_half_prime[:,0] - 4*B_half_dt/self.Gamma**2*u_half_prime[:,1] + u_half_prime[:,0]) * exp_term
+    #         mu_v_full = (B_half_dt*u_half_prime[:,0] - 2*B_half_dt/self.Gamma*u_half_prime[:,1] + u_half_prime[:,1]) * exp_term
+    #         mu_full = torch.stack([mu_x_full, mu_v_full], dim=1)
+
+    #         eps = torch.randn_like(mu_full)  # (batch, 2)
+    #         zs[:, i-1, :] = mu_full + eps @ chol_half.T
+
+    #     return zs
+
     
     def solve_reverse_sde_ubu(self, zT):
         return None
@@ -242,18 +330,18 @@ class CriticallyDampedLangevin(DiffusionModel):
         axes[0, 0].plot(ts_cpu, forward_paths[:10, :, 0].T, lw=1.5, color='darkblue', alpha=1.0)
         axes[0, 0].set_title('Forward: Position')
         axes[0, 0].set_ylabel('Position')
-        axes[0, 0].set_ylim(-60, 60)
+        #axes[0, 0].set_ylim(-60, 60)
 
         # Reverse trajectories
         axes[0, 1].plot(ts_cpu, reverse_sde_paths[10:n_plot, :, 0].T, lw=1.5, color='darkblue', alpha=0.05)
         axes[0, 1].plot(ts_cpu, reverse_sde_paths[:10, :, 0].T, lw=1.5, color='darkblue', alpha=1.0)
         axes[0, 1].set_title('Reverse: Position')
-        axes[0, 1].set_ylim(-60, 60)
+        #axes[0, 1].set_ylim(-60, 60)
 
         # Final distribution
         plot_position_dist(reverse_sde_paths[:, 0, 0], self.gmm_params, axes[0, 2])
         axes[0, 2].set_title("Final Position Distribution")
-        axes[0, 2].set_xlim(-60, 60)
+        #axes[0, 2].set_xlim(-60, 60)
 
         # --- Momentum Plots ---
         # Forward trajectories
@@ -262,19 +350,19 @@ class CriticallyDampedLangevin(DiffusionModel):
         axes[1, 0].set_title('Forward: Momentum')
         axes[1, 0].set_xlabel('Time')
         axes[1, 0].set_ylabel('Momentum')
-        axes[1, 0].set_ylim(-60, 60)
+        #axes[1, 0].set_ylim(-60, 60)
 
         # Reverse trajectories
         axes[1, 1].plot(ts_cpu, reverse_sde_paths[10:n_plot, :, 1].T, lw=1.5, color='darkblue', alpha=0.05)
         axes[1, 1].plot(ts_cpu, reverse_sde_paths[:10, :, 1].T, lw=1.5, color='darkblue', alpha=1.0)
         axes[1, 1].set_title('Reverse: Momentum')
         axes[1, 1].set_xlabel('Time')
-        axes[1, 1].set_ylim(-60, 60)
+        #axes[1, 1].set_ylim(-60, 60)
         
         # Final distribution
         plot_aux_dist(axes[1, 2], (reverse_sde_paths[:, 0, 1], 'Momentum'), target_dist=(0, np.sqrt(self.v_init_var)))
         axes[1, 2].set_title("Final Momentum Distribution")
-        axes[1, 2].set_xlim(-40, 40)
+        #axes[1, 2].set_xlim(-40, 40)
         
         plt.tight_layout(rect=[0, 0, 1, 0.96])
         plt.show()
