@@ -4,6 +4,9 @@ import numpy as np
 from viz import plot_aux_dist, plot_position_dist
 from scipy.signal import convolve
 from base import DiffusionModel
+from models import ScoreNetwork
+import torch.nn as nn
+import torch.optim as optim
 
 DEVICE = torch.device("cpu")
 
@@ -58,23 +61,40 @@ class VPSDE(DiffusionModel):
             xs[:, i+1] = xs[:, i] + drift * self.dt + diffusion * noise
         return xs
 
-    def solve_reverse_sde(self, xT):
-        xs = torch.zeros(xT.shape[0], self.n_steps, device=DEVICE); xs[:, -1] = xT
-        for i in range(self.n_steps - 1, 0, -1):
-            beta = self.beta_t[i:i+1]
-            score = self._score_fn(xs[:, i], i)
-            drift = -0.5 * beta * xs[:, i] - beta * score
-            diffusion = torch.sqrt(beta)
-            noise = torch.randn_like(xs[:, i]) * torch.sqrt(self.dt)
-            xs[:, i-1] = xs[:, i] - drift * self.dt + diffusion * noise
+    def solve_reverse_sde(self, xT, score_model=None):
+        """
+        Solve the reverse SDE, using either the ground truth score function
+        or a trained score network if provided.
+        """
+        batch = xT.shape[0]
+        xs = torch.zeros(batch, self.n_steps, device=DEVICE)
+        xs[:, -1] = xT.view(-1)
+
+        with torch.no_grad():  # <- disable gradient tracking
+            for i in range(self.n_steps - 1, 0, -1):
+                beta = self.beta_t[i]
+                xt = xs[:, i]
+
+                if score_model is None:
+                    score = self._score_fn(xt, i)
+                else:
+                    t_idx = torch.full((batch,), i, device=DEVICE, dtype=torch.long)
+                    score = score_model(xt, t_idx).view(-1)
+
+                drift = -0.5 * beta * xt - beta * score
+                noise = torch.randn_like(xt) * torch.sqrt(self.dt)
+                xs[:, i-1] = xt - drift * self.dt + torch.sqrt(beta) * noise
+
         return xs
 
-    def run_demonstration(self, n_plot, n_hist):
+
+
+    def run_demonstration(self, n_plot, n_hist, score_model=None):
         x0_plot = self._get_initial_samples(n_plot)
         xT_hist = torch.randn(n_hist, device=DEVICE)
         
         forward_paths = self.solve_forward_sde(x0_plot).cpu().numpy()
-        reverse_paths = self.solve_reverse_sde(xT_hist).cpu().numpy()
+        reverse_paths = self.solve_reverse_sde(xT_hist, score_model=score_model).cpu().numpy()
         
         fig, axes = plt.subplots(1, 3, figsize=(18, 5))
         fig.suptitle(f'{self.name} Demonstration', fontsize=16)
@@ -99,3 +119,65 @@ class VPSDE(DiffusionModel):
         
         plt.tight_layout(rect=[0, 0, 1, 0.96])
         plt.show()
+
+    def train_score_network(self, n_epochs=50, batch_size=128, lr=1e-3, n_steps=1000):
+        """
+        Vectorized training of score network (returns model, losses).
+        """
+        model = ScoreNetwork().to(DEVICE)
+        optimizer = optim.Adam(model.parameters(), lr=lr)
+        loss_fn = nn.MSELoss()
+
+        losses = []
+
+        for epoch in range(n_epochs):
+            total_loss = 0.0
+            for _ in range(n_steps):
+                # sample x0 and timesteps
+                x0 = self._get_initial_samples(batch_size).to(DEVICE).view(-1)   # (batch,)
+                t_idx = torch.randint(0, self.n_steps, (batch_size,), device=DEVICE)
+
+                # compute alpha per-sample
+                alpha = self.alpha_t[t_idx].to(DEVICE)                 # (batch,)
+                sqrt_alpha = torch.sqrt(alpha)
+
+                # sample x_t from p(x_t | x0) vectorized
+                mean_t = x0 * sqrt_alpha                              # (batch,)
+                std_t = torch.sqrt(1.0 - alpha)                       # (batch,)
+                xt = mean_t + std_t * torch.randn_like(mean_t)        # (batch,)
+
+                # compute ground-truth score s_t(x) = grad log p_t(x) vectorized
+                numerator = torch.zeros_like(xt)
+                denominator = torch.zeros_like(xt)
+                # loop over mixture components (num components is small)
+                for w, m, s in zip(self.gmm_params['weights'],
+                                self.gmm_params['means'],
+                                self.gmm_params['stds']):
+                    # component parameters per sample
+                    mean_comp = m * sqrt_alpha                        # (batch,)
+                    std_comp = torch.sqrt((s**2) * alpha + (1.0 - alpha))  # (batch,)
+                    dist = torch.distributions.Normal(mean_comp, std_comp)
+                    pdf = torch.exp(dist.log_prob(xt))                # (batch,)
+                    grad_log_pdf = -(xt - mean_comp) / (std_comp**2)  # (batch,)
+                    numerator += w * pdf * grad_log_pdf
+                    denominator += w * pdf
+
+                scores_true = numerator / (denominator + 1e-8)        # (batch,)
+
+                # predict, compute loss
+                scores_pred = model(xt, t_idx)                        # (batch,)
+                loss = loss_fn(scores_pred, scores_true)
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                total_loss += float(loss.item())
+
+            avg_loss = total_loss / n_steps
+            losses.append(avg_loss)
+            print(f"Epoch {epoch+1}/{n_epochs} - Loss: {avg_loss:.6f}")
+
+        return model, losses
+
+

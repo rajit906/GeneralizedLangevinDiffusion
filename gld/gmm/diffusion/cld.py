@@ -1,7 +1,5 @@
 # TODO:
 # Vectorize. Remove MVN. Remove inverse.
-# Implement PFODE with inbuilt solver.
-# Implement UBU
 
 import torch
 import matplotlib.pyplot as plt
