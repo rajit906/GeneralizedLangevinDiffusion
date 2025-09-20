@@ -120,9 +120,59 @@ class VPSDE(DiffusionModel):
         plt.tight_layout(rect=[0, 0, 1, 0.96])
         plt.show()
 
-    def train_score_network(self, n_epochs=50, batch_size=128, lr=1e-3, n_steps=1000):
+    def train_score_network_dsm(self, n_epochs=50, batch_size=128, lr=1e-3, n_steps=1000):
+        """
+        Train a score network with denoising score matching (DSM).
+        Does not require access to ground truth score.
+        """
+        model = ScoreNetwork().to(DEVICE)
+        optimizer = optim.Adam(model.parameters(), lr=lr)
+        loss_fn = nn.MSELoss()
+
+        losses = []
+
+        for epoch in range(n_epochs):
+            total_loss = 0.0
+            for _ in range(n_steps):
+                # sample x0 and timesteps
+                x0 = self._get_initial_samples(batch_size).to(DEVICE).view(-1)   # (batch,)
+                t_idx = torch.randint(0, self.n_steps, (batch_size,), device=DEVICE)
+
+                # compute alpha and sigma for timestep
+                alpha = self.alpha_t[t_idx].to(DEVICE)                 # (batch,)
+                sqrt_alpha = torch.sqrt(alpha)
+                sigma = torch.sqrt(1.0 - alpha)                        # (batch,)
+
+                # corrupt data
+                eps = torch.randn_like(x0)                             # (batch,)
+                xt = sqrt_alpha * x0 + sigma * eps                     # (batch,)
+
+                # target from DSM: -(eps / sigma)
+                target = -(eps / sigma)
+
+                # predict score
+                scores_pred = model(xt, t_idx).view(-1)                # (batch,)
+
+                # loss
+                loss = loss_fn(scores_pred, target)
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                total_loss += float(loss.item())
+
+            avg_loss = total_loss / n_steps
+            losses.append(avg_loss)
+            print(f"[DSM] Epoch {epoch+1}/{n_epochs} - Loss: {avg_loss:.6f}")
+
+        return model, losses
+
+
+    def train_score_network_fisher(self, n_epochs=50, batch_size=128, lr=1e-3, n_steps=1000):
         """
         Vectorized training of score network (returns model, losses).
+        This is Fisher matching where we have access to GT score.
         """
         model = ScoreNetwork().to(DEVICE)
         optimizer = optim.Adam(model.parameters(), lr=lr)

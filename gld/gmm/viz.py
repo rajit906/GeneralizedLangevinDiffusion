@@ -1,17 +1,33 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import torch
 plt.style.use('seaborn-v0_8-whitegrid')
 # --- Plotting Helper Functions ---
 def plot_position_dist(generated_samples, gmm_params, ax):
     """Plots the final position distribution against the true GMM PDF."""
-    x_range = np.linspace(-np.min(generated_samples), np.max(generated_samples), 400)
+    # Ensure NumPy
+    if isinstance(generated_samples, torch.Tensor):
+        samples_np = generated_samples.detach().cpu().numpy()
+    else:
+        samples_np = np.asarray(generated_samples)
+
+    pad = 2.0
+    x_min, x_max = samples_np.min(), samples_np.max()
+    x_range = np.linspace(x_min - pad, x_max + pad, 400)
+
     true_pdf = np.zeros_like(x_range)
     for w, m, s in zip(gmm_params['weights'], gmm_params['means'], gmm_params['stds']):
-        true_pdf += w.cpu().numpy() * (1 / (s.cpu().numpy() * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x_range - m.cpu().numpy()) / s.cpu().numpy())**2)
-    
-    ax.plot(x_range, true_pdf, 'r--', lw=2, label=r'Target $p_0(x)$')
-    ax.hist(generated_samples, bins=100, density=True, alpha=0.75, label='Generated Samples')
-    ax.set_title('Final Position Distribution'); ax.set_xlabel('Position x'); ax.set_ylabel('Density'); ax.legend()
+        w, m, s = float(w), float(m), float(s)
+        true_pdf += w * (1 / (s * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x_range - m) / s) ** 2)
+
+    ax.hist(samples_np, bins=100, density=True, alpha=0.75, label="Generated Samples")
+    ax.plot(x_range, true_pdf, "r--", lw=2, label=r"Target $p_0(x)$")
+    ax.set_title("Final Position Distribution")
+    ax.set_xlabel("Position x")
+    ax.set_ylabel("Density")
+    ax.legend()
+
+
 
 def plot_aux_dist(ax, *args, target_dist=None):
     """Plots one or more auxiliary distributions (e.g., momentum) on the same axes."""
