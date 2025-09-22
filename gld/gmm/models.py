@@ -43,3 +43,45 @@ class ScoreNetwork(nn.Module):
         out = self.net(h)                       # (batch,1)
         return out.squeeze(-1)                  # (batch,)
 
+
+class CLDScoreNetwork(nn.Module):
+    def __init__(self, hidden_dim=64, time_emb_dim=16):
+        super().__init__()
+        self.time_emb = SinusoidalTimeEmbedding(time_emb_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(1 + time_emb_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
+        )
+
+    def forward(self, v, t_idx):
+        # v: (batch, 1)
+        # t_idx: (batch,)
+        t_emb = self.time_emb(t_idx)   # (batch, time_emb_dim)
+        inp = torch.cat([v, t_emb], dim=1)  # (batch, 1+time_emb_dim)
+        return self.mlp(inp)  # (batch, 1)
+
+class GLDScoreNetwork(nn.Module):
+    """
+    Score network for Generalized Langevin Diffusion.
+    Inputs: (p, s) of shape (batch, 2), time index t_idx of shape (batch,)
+    Outputs: score estimate of shape (batch, 2).
+    """
+    def __init__(self, hidden_dim=128, time_emb_dim=32):
+        super().__init__()
+        self.time_emb = SinusoidalTimeEmbedding(time_emb_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(2 + time_emb_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 2)
+        )
+
+    def forward(self, ps, t_idx):
+        # ps: (B,2), t_idx: (B,)
+        t_emb = self.time_emb(t_idx.float())
+        h = torch.cat([ps, t_emb], dim=-1)
+        return self.mlp(h)  # (B,2)

@@ -8,6 +8,8 @@ from viz import plot_aux_dist, plot_position_dist
 from base import DiffusionModel
 from scipy.integrate import solve_ivp
 import scipy.linalg
+import torch.nn as nn
+import torch.optim as optim
 
 DEVICE = torch.device("cpu")
 
@@ -94,21 +96,6 @@ class CriticallyDampedLangevin(DiffusionModel):
 
         return weights, means_t, covs_t
 
-    # def _score_fn(self, z, t_idx):
-    #     weights, means, covs = self._get_perturbed_params(t_idx)
-    #     p_t_z = torch.zeros(z.shape[0], device=DEVICE)
-    #     grad_v_p_t_z = torch.zeros(z.shape[0], device=DEVICE)
-    #     for w, mean, cov in zip(weights, means, covs):
-    #         stable_cov = cov + 1e-6 * torch.eye(2, device=DEVICE)
-    #         dist = torch.distributions.MultivariateNormal(mean, stable_cov)
-    #         pdf = torch.exp(dist.log_prob(z))
-    #         grad_log_pdf = -torch.linalg.solve(stable_cov, (z - mean).T).T
-    #         p_t_z += w * pdf
-    #         grad_v_p_t_z += w * pdf * grad_log_pdf[:, 1]
-    #         score_full = torch.zeros_like(z)
-    #         score_full[:, 1] = grad_v_p_t_z / (p_t_z + 1e-8)
-    #     return score_full
-
     def _score_fn(self, z, t_idx):
         weights, means, covs = self._get_perturbed_params(t_idx)
         n_batch, dim = z.shape
@@ -165,109 +152,98 @@ class CriticallyDampedLangevin(DiffusionModel):
             zs[:, i+1, :] = z + dz
         return zs
 
-    def solve_reverse_sde_em(self, zT):
+    def solve_reverse_sde_em(self, zT, score_model=None):
         """
-        Solves the reverse SDE using the Euler-Maruyama method.
+        Reverse SDE (Euler–Maruyama), optionally using learned score (velocity only).
         """
         zs = torch.zeros(zT.shape[0], self.n_steps, 2, device=DEVICE)
         zs[:, -1, :] = zT
         sqrt_dt = torch.sqrt(self.dt)
-        for i in range(self.n_steps - 1, -1, -1):
-            z = zs[:, i, :]
-            score_full = self._score_fn(z, i)
-            f_fwd = -self.beta * (self.A @ z.T).T
-            score_drift = (self.GGt @ score_full.T).T
-            drift_rev = -f_fwd + score_drift
-            dW = torch.randn_like(z) * sqrt_dt
-            diffusion = (self.G @ dW.T).T
-            if i > 0:
-                zs[:, i-1, :] = z - drift_rev * self.dt + diffusion
+
+        with torch.no_grad():
+            for i in range(self.n_steps - 1, -1, -1):
+                z = zs[:, i, :]
+
+                if score_model is None:
+                    score_full = self._score_fn(z, i)
+                    score_v = score_full[:, 1]
+                else:
+                    v = z[:, 1:2]  # (B,1)
+                    t_idx = torch.full((z.shape[0],), i, device=DEVICE, dtype=torch.long)
+                    score_v = score_model(v, t_idx).squeeze(-1)
+
+                f_fwd = -self.beta * (self.A @ z.T).T
+                score_drift = (self.GGt @ torch.stack([torch.zeros_like(score_v), score_v], dim=1).T).T
+                drift_rev = -f_fwd + score_drift
+                dW = torch.randn_like(z) * sqrt_dt
+                diffusion = (self.G @ dW.T).T
+                if i > 0:
+                    zs[:, i-1, :] = z - drift_rev * self.dt + diffusion
+
         return zs
+
+
     
-    def solve_reverse_sde_sscs(self, zT):
+    def solve_reverse_sde_sscs(self, zT, score_model=None):
+        """
+        Reverse SDE using SSCS scheme, optionally with learned score (velocity only).
+        """
         zs = torch.zeros(zT.shape[0], self.n_steps, 2, device=DEVICE); zs[:, -1, :] = zT
         M_inv = 1.0 / self.M
         B_half_dt = self.beta * (self.dt.item() / 2)
         exp_term = np.exp(-2 * B_half_dt / self.Gamma)
         exp_full_dt = np.exp(4 * B_half_dt / self.Gamma)
+
         cov_xx = exp_full_dt - 1 - 4*B_half_dt/self.Gamma - 8*B_half_dt**2/self.Gamma**2
         cov_xv = -4 * B_half_dt**2 / self.Gamma
         cov_vv = self.Gamma**2/4*(exp_full_dt-1) + B_half_dt*self.Gamma - 2*B_half_dt**2
         cov_half_np = np.array([[cov_xx, cov_xv], [cov_xv, cov_vv]]) * np.exp(-4*B_half_dt/self.Gamma)
         cov_half = torch.from_numpy(cov_half_np).float().to(DEVICE)
 
-        for i in range(self.n_steps - 1, 0, -1):
-            u_n = zs[:, i, :]
-            mu_x_half = (2*B_half_dt/self.Gamma*u_n[:,0]-4*B_half_dt/self.Gamma**2*u_n[:,1]+u_n[:,0])*exp_term
-            mu_v_half = (B_half_dt*u_n[:,0]-2*B_half_dt/self.Gamma*u_n[:,1]+u_n[:,1])*exp_term
-            mu_half = torch.stack([mu_x_half, mu_v_half], dim=1)
-            u_half = torch.distributions.MultivariateNormal(mu_half, cov_half).sample()
-            score_v = self._score_fn(u_half, i)[:, 1]
-            v_update = self.dt * (2 * self.beta * self.Gamma * (score_v + M_inv * u_half[:,1]))
-            u_half_prime = u_half.clone(); u_half_prime[:, 1] += v_update
-            mu_x_full = (2*B_half_dt/self.Gamma*u_half_prime[:,0]-4*B_half_dt/self.Gamma**2*u_half_prime[:,1]+u_half_prime[:,0])*exp_term
-            mu_v_full = (B_half_dt*u_half_prime[:,0]-2*B_half_dt/self.Gamma*u_half_prime[:,1]+u_half_prime[:,1])*exp_term
-            mu_full = torch.stack([mu_x_full, mu_v_full], dim=1)
-            zs[:, i-1, :] = torch.distributions.MultivariateNormal(mu_full, cov_half).sample()
+        with torch.no_grad():
+            for i in range(self.n_steps - 1, 0, -1):
+                u_n = zs[:, i, :]
+
+                # half-step mean
+                mu_x_half = (2*B_half_dt/self.Gamma*u_n[:,0] - 4*B_half_dt/self.Gamma**2*u_n[:,1] + u_n[:,0]) * exp_term
+                mu_v_half = (B_half_dt*u_n[:,0] - 2*B_half_dt/self.Gamma*u_n[:,1] + u_n[:,1]) * exp_term
+                mu_half = torch.stack([mu_x_half, mu_v_half], dim=1)
+
+                u_half = torch.distributions.MultivariateNormal(mu_half, cov_half).sample()
+
+                # --- Score (velocity only) ---
+                if score_model is None:
+                    score_full = self._score_fn(u_half, i)
+                    score_v = score_full[:, 1]
+                else:
+                    v = u_half[:, 1:2]
+                    t_idx = torch.full((u_half.shape[0],), i, device=DEVICE, dtype=torch.long)
+                    score_v = score_model(v, t_idx).squeeze(-1)
+
+                # velocity update
+                v_update = self.dt * (2 * self.beta * self.Gamma * (score_v + M_inv * u_half[:,1]))
+                u_half_prime = u_half.clone()
+                u_half_prime[:, 1] += v_update
+
+                # full-step mean
+                mu_x_full = (2*B_half_dt/self.Gamma*u_half_prime[:,0] - 4*B_half_dt/self.Gamma**2*u_half_prime[:,1] + u_half_prime[:,0]) * exp_term
+                mu_v_full = (B_half_dt*u_half_prime[:,0] - 2*B_half_dt/self.Gamma*u_half_prime[:,1] + u_half_prime[:,1]) * exp_term
+                mu_full = torch.stack([mu_x_full, mu_v_full], dim=1)
+
+                zs[:, i-1, :] = torch.distributions.MultivariateNormal(mu_full, cov_half).sample()
+
         return zs
-
-    # def solve_reverse_sde_sscs(self, zT):
-    #     zs = torch.zeros(zT.shape[0], self.n_steps, 2, device=DEVICE)
-    #     zs[:, -1, :] = zT
-
-    #     M_inv = 1.0 / self.M
-    #     B_half_dt = self.beta * (self.dt.item() / 2)
-
-    #     exp_term = np.exp(-2 * B_half_dt / self.Gamma)
-    #     exp_full_dt = np.exp(4 * B_half_dt / self.Gamma)
-
-    #     cov_xx = exp_full_dt - 1 - 4*B_half_dt/self.Gamma - 8*B_half_dt**2/self.Gamma**2
-    #     cov_xv = -4 * B_half_dt**2 / self.Gamma
-    #     cov_vv = self.Gamma**2/4*(exp_full_dt-1) + B_half_dt*self.Gamma - 2*B_half_dt**2
-
-    #     cov_half_np = np.array([[cov_xx, cov_xv], [cov_xv, cov_vv]]) * np.exp(-4*B_half_dt/self.Gamma)
-    #     cov_half = torch.from_numpy(cov_half_np).float().to(DEVICE)
-
-    #     # Precompute Cholesky for reuse
-    #     chol_half = torch.linalg.cholesky(cov_half)  # (2,2)
-
-    #     for i in range(self.n_steps - 1, 0, -1):
-    #         u_n = zs[:, i, :]
-
-    #         # --- half step ---
-    #         mu_x_half = (2*B_half_dt/self.Gamma*u_n[:,0] - 4*B_half_dt/self.Gamma**2*u_n[:,1] + u_n[:,0]) * exp_term
-    #         mu_v_half = (B_half_dt*u_n[:,0] - 2*B_half_dt/self.Gamma*u_n[:,1] + u_n[:,1]) * exp_term
-    #         mu_half = torch.stack([mu_x_half, mu_v_half], dim=1)
-
-    #         eps = torch.randn_like(mu_half)  # (batch, 2)
-    #         u_half = mu_half + eps @ chol_half.T
-
-    #         score_v = self._score_fn(u_half, i)[:, 1]
-    #         v_update = self.dt * (2 * self.beta * self.Gamma * (score_v + M_inv * u_half[:,1]))
-    #         u_half_prime = u_half.clone()
-    #         u_half_prime[:, 1] += v_update
-
-    #         # --- full step ---
-    #         mu_x_full = (2*B_half_dt/self.Gamma*u_half_prime[:,0] - 4*B_half_dt/self.Gamma**2*u_half_prime[:,1] + u_half_prime[:,0]) * exp_term
-    #         mu_v_full = (B_half_dt*u_half_prime[:,0] - 2*B_half_dt/self.Gamma*u_half_prime[:,1] + u_half_prime[:,1]) * exp_term
-    #         mu_full = torch.stack([mu_x_full, mu_v_full], dim=1)
-
-    #         eps = torch.randn_like(mu_full)  # (batch, 2)
-    #         zs[:, i-1, :] = mu_full + eps @ chol_half.T
-
-    #     return zs
-
     
     def solve_reverse_sde_ubu(self, zT):
         return None
     
-    def solve_reverse_sde(self, zT, type='sscs'):
+    def solve_reverse_sde(self, zT, type='sscs', score_model=None):
         if type=='em':
-            return self.solve_reverse_sde_em(zT)
+            return self.solve_reverse_sde_em(zT, score_model=score_model)
         elif type == 'sscs':
-            return self.solve_reverse_sde_sscs(zT)
+            return self.solve_reverse_sde_sscs(zT, score_model=score_model)
         elif type == 'ubu':
-            return self.solve_reverse_sde_ubu(zT)
+            return self.solve_reverse_sde_ubu(zT, score_model=score_model)
 
     def solve_pfode(self, zT, method="RK45"):
         """
@@ -307,7 +283,7 @@ class CriticallyDampedLangevin(DiffusionModel):
         return None
 
 
-    def run_demonstration(self, n_plot, n_hist):
+    def run_demonstration(self, n_plot, n_hist, score_model=None):
         x0_plot = self._get_initial_samples(n_plot)
         z0_plot = torch.stack([x0_plot, torch.randn(n_plot, device=DEVICE) * np.sqrt(self.v_init_var)], dim=1)
         xT_hist = torch.randn(n_hist, device=DEVICE)
@@ -315,7 +291,7 @@ class CriticallyDampedLangevin(DiffusionModel):
         zT_hist = torch.stack([xT_hist, vT_hist], dim=1)
         
         forward_paths = self.solve_forward_sde(z0_plot).cpu().numpy()
-        reverse_sde_paths = self.solve_reverse_sde(zT_hist, type='sscs').cpu().numpy()
+        reverse_sde_paths = self.solve_reverse_sde(zT_hist, type='sscs', score_model=score_model).cpu().numpy()
         
         fig, axes = plt.subplots(2, 3, figsize=(18, 10))
         fig.suptitle(f'{self.name} Demonstration', fontsize=16)
@@ -364,3 +340,58 @@ class CriticallyDampedLangevin(DiffusionModel):
         
         plt.tight_layout(rect=[0, 0, 1, 0.96])
         plt.show()
+
+    def train_score_network_hsm(self, ScoreNetwork, n_epochs=50, batch_size=128, lr=1e-3, n_steps=1000):
+        """
+        Train velocity-only score network with Hybrid Score Matching (HSM) [Sec. 3.2].
+        """
+        device = DEVICE
+        model = ScoreNetwork().to(device)
+        optimizer = optim.Adam(model.parameters(), lr=lr)
+        loss_fn = nn.MSELoss()
+
+        losses = []
+
+        for epoch in range(n_epochs):
+            total_loss = 0.0
+            for _ in range(n_steps):
+                # 1. Sample x0 ~ pdata(x0)
+                x0 = self._get_initial_samples(batch_size).to(device)  # (B,)
+
+                # 2. Sample timestep t uniformly
+                t_idx = torch.randint(0, self.n_steps, (batch_size,), device=device)
+
+                # 3. Perturb: mean + covariance for this t
+                weights, means, covs = self._get_perturbed_params(t_idx[0].item())
+                cov_t = covs[0]   # single covariance
+                L_t = torch.linalg.cholesky(cov_t)
+
+                eps = torch.randn(batch_size, 2, device=device)
+                mu_t = torch.stack([x0, torch.zeros_like(x0)], dim=1) @ self.M_ts[t_idx[0]]
+                u_t = mu_t + eps @ L_t.T  # (B, 2)
+
+                # 4. Target score (velocity only)
+                Σ_xx = cov_t[0,0]; Σ_xv = cov_t[0,1]; Σ_vv = cov_t[1,1]
+                ell_t = torch.sqrt(Σ_xx / (Σ_xx * Σ_vv - Σ_xv**2 + 1e-8))
+                target_v = -ell_t * eps[:,1]  # (B,)
+
+                # 5. Predict score from velocity channel
+                v = u_t[:, 1:2]  # (B,1)
+                scores_pred = model(v, t_idx).squeeze(-1)  # (B,)
+
+                # 6. Loss
+                loss = loss_fn(scores_pred, target_v)
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                total_loss += float(loss.item())
+
+            avg_loss = total_loss / n_steps
+            losses.append(avg_loss)
+            print(f"[HSM] Epoch {epoch+1}/{n_epochs} - Loss: {avg_loss:.6f}")
+
+        return model, losses
+
+    

@@ -5,6 +5,8 @@ from viz import plot_aux_dist, plot_position_dist
 from base import DiffusionModel
 import scipy.linalg
 from matrix_exp import stationary_covariance, compute_mean_and_covariance
+import torch.nn as nn
+import torch.optim as optim
 
 DEVICE = torch.device("cpu")
 
@@ -176,7 +178,7 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         final_score_3d = grad_v_p_t_z / (p_t_z.unsqueeze(1) + 1e-8)
         return final_score_3d
 
-    def solve_reverse_sde_em(self, zT):
+    def solve_reverse_sde_em(self, zT, score_model=None):
         """
         Solves the reverse SDE dz = [-beta*A*z - G*G^T*S']dt + G*dW_bar using Euler-Maruyama.
         """
@@ -185,7 +187,13 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         sqrt_dt = torch.sqrt(self.dt)
         for i in range(self.n_steps - 1, -1, -1):
             z = zs[:, i, :]
-            score_full = self._score_fn(z, i)
+            if score_model is None:
+                score_full = self._score_fn(z, i)  # (B,3)
+            else:
+                t_idx = torch.full((z.shape[0],), i, device=DEVICE, dtype=torch.long)
+                ps = z[:, 1:]  # (B,2)
+                score_ps = score_model(ps, t_idx)  # (B,2)
+                score_full = torch.cat([torch.zeros_like(ps[:, :1]), score_ps], dim=1)  # (B,3)
             f_fwd = -self.beta * (self.A @ z.T).T
             score_drift = (self.GGt @ score_full.T).T
             drift_rev = -f_fwd + score_drift
@@ -215,7 +223,7 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         _, Sigma_OU_half_np = compute_mean_and_covariance(dt_half, self.beta, A_O, self.G.cpu().numpy(), mu_0=np.zeros(3), Sigma_0=np.zeros((3, 3)), C=C_O)
         self.L_OU_half = torch.from_numpy(np.linalg.cholesky(Sigma_OU_half_np + 1e-9 * np.eye(3))).float().to(DEVICE)
     
-    def solve_reverse_sde_sscs(self, zT):
+    def solve_reverse_sde_sscs(self, zT, score_model=None):
         """
         Solves the reverse SDE using a symmetric splitting integrator:
         A_H(dt/2) -> A_O(dt/2) -> S(dt) -> A_O(dt/2) -> A_H(dt/2)
@@ -242,9 +250,13 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
             z2 = z2_drift + noise1
 
             # --- Step 3: Score Full-Euler-Step (S for dt) ---
-            score_old = self._score_fn(z2, t_idx)
-            #print((score_old.T).size())
-            #print((z2.T).size())
+            if score_model is None:
+                score_old = self._score_fn(z2, t_idx)
+            else:
+                t_idx_tensor = torch.full((z2.shape[0],), t_idx, device=DEVICE, dtype=torch.long)
+                ps = z2[:, 1:]
+                score_ps = score_model(ps, t_idx_tensor)
+                score_old = torch.cat([torch.zeros_like(ps[:, :1]), score_ps], dim=1)
             score_drift_old = (self.GGt @ (score_old.T + z2.T)).T
             z3 = z2 + score_drift_old * self.dt
 
@@ -312,7 +324,7 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         self.F_half = torch.from_numpy(self.F_half_np).float().to(DEVICE)
         self.S_half = torch.from_numpy(self.S_half_np).float().to(DEVICE)
    
-    def solve_reverse_sde_sscs2(self, zT):
+    def solve_reverse_sde_sscs2(self, zT, score_model=None):
         """
         Solves the reverse SDE using a symmetric splitting integrator:
         A_H(dt/2) -> A_O(dt/2) -> S(dt) -> A_O(dt/2) -> A_H(dt/2)
@@ -326,12 +338,6 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
             z1 = zs[:, i, :]
             t_idx = i
 
-            # --- Step 1: Hamiltonian Half-Step (A_H for dt/2) ---
-            # x, p, s = z.split(1, dim=-1)
-            # p1 = p + (self.beta * x) * dt_half
-            # x1 = x - (self.beta * self.M_inv * p1) * dt_half
-            # z1 = torch.cat([x1, p1, s], dim=-1)
-
             # --- Step 2: Ornstein-Uhlenbeck Half-Step (A_O for dt/2) ---
             # Apply pre-computed drift and diffusion
             z2_drift = (self.F_half  @ z1.T).T
@@ -339,22 +345,19 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
             z2 = z2_drift + noise1
 
             # # --- Step 3: Score Full-Euler-Step (S for dt) ---
-            score_old = self._score_fn(z2, t_idx)
-            # #print((score_old.T).size())
-            # #print((z2.T).size())
+            if score_model is None:
+                score_old = self._score_fn(z2, t_idx)
+            else:
+                t_idx_tensor = torch.full((z2.shape[0],), t_idx, device=DEVICE, dtype=torch.long)
+                ps = z2[:, 1:]
+                score_ps = score_model(ps, t_idx_tensor)
+                score_old = torch.cat([torch.zeros_like(ps[:, :1]), score_ps], dim=1)
             score_drift_old = (self.GGt @ (score_old.T + z2.T)).T
             z3 = z2 + score_drift_old * self.dt
-            # z3 = z2
             # --- Step 4: Ornstein-Uhlenbeck Half-Step (A_O for dt/2) ---
             z4_drift = (self.F_half @ z3.T).T
             noise2 = (self.S_half @ torch.randn_like(z3).T).T
             z4 = z4_drift + noise2
-
-            # --- Step 5: Hamiltonian Half-Step (A_H for dt/2, symmetric) ---
-            # x4, p4, s4 = z4.split(1, dim=-1)
-            # x5 = x4 - (self.beta * self.M_inv * p4) * dt_half
-            # p5 = p4 + (self.beta * x5) * dt_half
-            # z_next = torch.cat([x5, p5, s4], dim=-1)
             
             zs[:, i-1, :] = z4
 
@@ -365,7 +368,7 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         self.S_half = torch.from_numpy(self.S_half_np).float().to(DEVICE)
         self.Ft_half = torch.from_numpy(self.Ft_half_np).float().to(DEVICE)
    
-    def solve_reverse_sde_sscs3(self, zT):
+    def solve_reverse_sde_sscs3(self, zT, score_model=None):
         """
         Solves the reverse SDE using a symmetric splitting integrator:
         (At_H(dt/2) + At_O(dt/2)) -> S(dt) -> (At_O(dt/2) + At_H(dt/2))
@@ -378,13 +381,6 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         for i in range(self.n_steps - 1, 0, -1):
             z1 = zs[:, i, :]
             t_idx = i
-
-            # --- Step 1: Hamiltonian Half-Step (A_H for dt/2) ---
-            # x, p, s = z.split(1, dim=-1)
-            # p1 = p + (self.beta * x) * dt_half
-            # x1 = x - (self.beta * self.M_inv * p1) * dt_half
-            # z1 = torch.cat([x1, p1, s], dim=-1)
-
             # --- Step 2: Ornstein-Uhlenbeck Half-Step (A_O for dt/2) ---
             # Apply pre-computed drift and diffusion
             z2_drift = (self.F_half  @ z1.T).T
@@ -394,46 +390,43 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
             z2t = (self.Ft_half @ z2.T).T
             
             # # --- Step 3: Score Full-Euler-Step (S for dt) ---
-            score_old = self._score_fn(z2t, t_idx)
-            # #print((score_old.T).size())
-            # #print((z2.T).size())
+            if score_model is None:
+                score_old = self._score_fn(z2, t_idx)
+            else:
+                t_idx_tensor = torch.full((z2.shape[0],), t_idx, device=DEVICE, dtype=torch.long)
+                ps = z2[:, 1:]
+                score_ps = score_model(ps, t_idx_tensor)
+                score_old = torch.cat([torch.zeros_like(ps[:, :1]), score_ps], dim=1)
             score_drift_old = (self.GGt @ score_old.T).T
             z3 = z2t + score_drift_old * self.dt
             
             z3t = (self.Ft_half @ z3.T).T
-            # z3 = z2
             # --- Step 4: Ornstein-Uhlenbeck Half-Step (A_O for dt/2) ---
             z4_drift = (self.F_half @ z3t.T).T
             noise2 = (self.S_half @ torch.randn_like(z3t).T).T
             z4 = z4_drift + noise2
-
-            # --- Step 5: Hamiltonian Half-Step (A_H for dt/2, symmetric) ---
-            # x4, p4, s4 = z4.split(1, dim=-1)
-            # x5 = x4 - (self.beta * self.M_inv * p4) * dt_half
-            # p5 = p4 + (self.beta * x5) * dt_half
-            # z_next = torch.cat([x5, p5, s4], dim=-1)
             
             zs[:, i-1, :] = z4
 
         return zs
     
-    def solve_reverse_sde_ubu(self, zT):
+    def solve_reverse_sde_ubu(self, zT, score_model=None):
         return None
     
-    def solve_reverse_sde(self, zT, type='em'):
+    def solve_reverse_sde(self, zT, type='em', score_model=None):
         if type=='em':
-            return self.solve_reverse_sde_em(zT)
+            return self.solve_reverse_sde_em(zT, score_model=score_model)
         elif type == 'sscs':
             self.precompute_sscs()
-            return self.solve_reverse_sde_sscs(zT)
+            return self.solve_reverse_sde_sscs(zT, score_model=score_model)
         elif type == 'sscs2':
             self.precompute_sscs2()
-            return self.solve_reverse_sde_sscs2(zT)
+            return self.solve_reverse_sde_sscs2(zT, score_model=score_model)
         elif type == 'sscs3':
             self.precompute_sscs3()
-            return self.solve_reverse_sde_sscs3(zT)
+            return self.solve_reverse_sde_sscs3(zT, score_model=score_model)
         elif type == 'ubu':
-            return self.solve_reverse_sde_ubu(zT)
+            return self.solve_reverse_sde_ubu(zT, score_model=score_model)
         
     def solve_forward_sde(self, z0, type='em'):
         if type=='em':
@@ -464,7 +457,7 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
                 zs[:, i - 1, :] = z - drift_ode * self.dt
         return zs
 
-    def run_demonstration(self, n_plot, n_hist):
+    def run_demonstration(self, n_plot, n_hist, score_model=None):
         """
         Runs and visualizes both the forward and reverse SDE/ODE processes,
         including histograms of terminal forward distributions vs. true law.
@@ -480,7 +473,7 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         pT_hist = torch.randn(n_hist, device=DEVICE) * np.sqrt(self.M)
         sT_hist = torch.randn(n_hist, device=DEVICE)
         zT_hist = torch.stack([xT_hist, pT_hist, sT_hist], dim=1)
-        reverse_sde_paths = self.solve_reverse_sde(zT_hist, type=self.inttype).cpu().numpy()
+        reverse_sde_paths = self.solve_reverse_sde(zT_hist, type=self.inttype, score_model=score_model).detach().cpu().numpy()
 
         fig, axes = plt.subplots(3, 3, figsize=(18, 15))
         fig.suptitle(f'{self.name} Demonstration', fontsize=16)
@@ -531,55 +524,66 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         axes[2, 2].set_title("Final Memory Distribution (Reverse)")
         axes[2, 2].set_xlim(-6, 6)
 
-        # # === [FIXED] Forward terminal histograms vs. truth (col 4) ===
-        # terminal_params = self.perturbation_cache[self.n_steps - 1]
-        # weights = terminal_params['weights']
-        # means_k = terminal_params['means']
-        # covs_k = terminal_params['covs']
-        # n_components = len(weights)
-
-        # weights_tensor = torch.tensor(weights, device=DEVICE)
-        # component_indices = torch.multinomial(weights_tensor, n_hist, replacement=True)
-        # zT_samples = torch.zeros(n_hist, 3, device=DEVICE)
-
-        # for k in range(n_components):
-        #     samples_k_mask = (component_indices == k)
-        #     n_samples_k = samples_k_mask.sum()
-
-        #     if n_samples_k > 0:
-        #         mean_k = means_k[k]
-        #         cov_k = covs_k[k]
-        #         stable_cov_k = cov_k + 1e-6 * torch.eye(cov_k.shape[0], device=DEVICE)
-        #         dist = torch.distributions.MultivariateNormal(mean_k, covariance_matrix=stable_cov_k)
-        #         zT_samples[samples_k_mask] = dist.sample((n_samples_k,))
-
-        # zT_samples_np = zT_samples.cpu().numpy()
-        # xT, pT, sT = zT_samples_np[:, 0], zT_samples_np[:, 1], zT_samples_np[:, 2]
-
-        # # --- Plotting the distributions ---
-        # pts = np.linspace(-4, 4, 200)
-        # # Position
-        # axes[0, 3].hist(xT, bins=50, density=True, alpha=0.7, color='darkblue', label='Sampled p(x, T)')
-        # axes[0, 3].plot(pts, scipy.stats.norm.pdf(pts, 0, 1.), 'r--', lw=2, label=f"Ref: Stationary N(0, 1)")
-        # axes[0, 3].set_title("Forward Terminal Position p(x, T=1)")
-        # axes[0, 3].set_xlim(-6, 6)
-        # axes[0, 3].legend()
-
-        # # Momentum
-        # axes[1, 3].hist(pT, bins=50, density=True, alpha=0.7, color='darkblue', label='Sampled p(p, T)')
-        # stationary_std_p = np.sqrt(self.M_inv)
-        # axes[1, 3].plot(pts, scipy.stats.norm.pdf(pts, 0, stationary_std_p), 'r--', lw=2, label=f"Ref: Stationary N(0, {stationary_std_p**2:.2f})")
-        # axes[1, 3].set_title("Forward Terminal Momentum p(p, T=1)")
-        # axes[1, 3].set_xlim(-4, 4)
-        # axes[1, 3].legend()
-
-        # # Memory
-        # axes[2, 3].hist(sT, bins=50, density=True, alpha=0.7, color='darkblue', label='Sampled p(s, T)')
-        # axes[2, 3].plot(pts, scipy.stats.norm.pdf(pts, 0, 1.), 'r--', lw=2, label=f"Ref: Stationary N(0, 1)")
-        # axes[2, 3].set_title("Forward Terminal Memory p(s, T=1)")
-        # axes[2, 3].set_xlim(-4, 4)
-        # axes[2, 3].legend()
-
         plt.tight_layout(rect=[0, 0, 1, 0.96])
         plt.show()
         return reverse_sde_paths
+
+    def train_score_network_hsm(self, ScoreNetwork, n_epochs=50, batch_size=128, lr=1e-3, n_steps=1000):
+        """
+        Train score network for GLD using Hybrid Score Matching (HSM).
+        Network predicts the conditional score of (p,s) given x0.
+        """
+        device = DEVICE
+        model = ScoreNetwork().to(device)
+        optimizer = optim.Adam(model.parameters(), lr=lr)
+        loss_fn = nn.MSELoss()
+
+        losses = []
+
+        for epoch in range(n_epochs):
+            total_loss = 0.0
+            for _ in range(n_steps):
+                # --- 1. Sample initial data (x0 from dataset, p0=s0=0 for HSM kernel) ---
+                x0 = self._get_initial_samples(batch_size).to(device)  # (B,)
+                z0 = torch.stack([x0, torch.zeros_like(x0), torch.zeros_like(x0)], dim=1)  # (B,3)
+
+                # --- 2. Sample random time index ---
+                t_idx = torch.randint(0, self.n_steps, (batch_size,), device=device)
+                t = self.ts[t_idx].to(device)  # continuous times
+
+                # --- 3. Perturbation kernel mean/cov ---
+                # For each component, compute mean_t, Sigma_t
+                weights, means, covs = self._get_perturbed_params(t[0].item())
+                mu_t = means[0]  # just use one GMM component (extend if needed)
+                Sigma_t = covs[0]
+
+                # Cholesky factorization
+                L_t = torch.linalg.cholesky(Sigma_t + 1e-6 * torch.eye(3, device=device))
+
+                # --- 4. Reparametrization ---
+                eps = torch.randn(batch_size, 3, device=device)
+                z_t = mu_t + eps @ L_t.T  # (B,3)
+
+                # --- 5. Target score (only for (p,s)) ---
+                # Conditional score wrt (p,s) is - (L_t^-T eps) restricted to indices 1,2
+                score_full = -torch.cholesky_inverse(L_t).T @ eps.T  # (3,B)
+                target = score_full[1:, :].T  # (B,2) → momentum + memory
+
+                # --- 6. Network prediction ---
+                ps = z_t[:, 1:]  # (p,s), shape (B,2)
+                scores_pred = model(ps, t_idx)  # (B,2)
+
+                # --- 7. Loss ---
+                loss = loss_fn(scores_pred, target)
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                total_loss += float(loss.item())
+
+            avg_loss = total_loss / n_steps
+            losses.append(avg_loss)
+            print(f"[GLD HSM] Epoch {epoch+1}/{n_epochs} - Loss: {avg_loss:.6f}")
+
+        return model, losses
