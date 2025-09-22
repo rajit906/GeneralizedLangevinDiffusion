@@ -78,8 +78,8 @@ class VPSDE(DiffusionModel):
                 if score_model is None:
                     score = self._score_fn(xt, i)
                 else:
-                    t_idx = torch.full((batch,), i, device=DEVICE, dtype=torch.long)
-                    score = score_model(xt, t_idx).view(-1)
+                    t_norm = torch.full((batch,), i, device=DEVICE, dtype=torch.float) / (self.n_steps - 1)
+                    score = score_model(xt, t_norm).view(-1)
 
                 drift = -0.5 * beta * xt - beta * score
                 noise = torch.randn_like(xt) * torch.sqrt(self.dt)
@@ -120,12 +120,8 @@ class VPSDE(DiffusionModel):
         plt.tight_layout(rect=[0, 0, 1, 0.96])
         plt.show()
 
-    def train_score_network_dsm(self, n_epochs=50, batch_size=128, lr=1e-3, n_steps=1000):
-        """
-        Train a score network with denoising score matching (DSM).
-        Does not require access to ground truth score.
-        """
-        model = ScoreNetwork().to(DEVICE)
+    def train_score_network_dsm(self, n_epochs=50, batch_size=128, lr=1e-4, n_steps=1000, clip_grad=1.0, device=DEVICE):
+        model = ScoreNetwork().to(device)
         optimizer = optim.Adam(model.parameters(), lr=lr)
         loss_fn = nn.MSELoss()
 
@@ -135,29 +131,31 @@ class VPSDE(DiffusionModel):
             total_loss = 0.0
             for _ in range(n_steps):
                 # sample x0 and timesteps
-                x0 = self._get_initial_samples(batch_size).to(DEVICE).view(-1)   # (batch,)
-                t_idx = torch.randint(0, self.n_steps, (batch_size,), device=DEVICE)
+                x0 = self._get_initial_samples(batch_size).to(device).view(-1)   # (batch,)
+                t_idx = torch.randint(0, self.n_steps, (batch_size,), device=device)
 
                 # compute alpha and sigma for timestep
-                alpha = self.alpha_t[t_idx].to(DEVICE)                 # (batch,)
+                alpha = self.alpha_t[t_idx].to(device)                 # (batch,)
                 sqrt_alpha = torch.sqrt(alpha)
                 sigma = torch.sqrt(1.0 - alpha)                        # (batch,)
 
-                # corrupt data
+                # corrupt data (DSM)
                 eps = torch.randn_like(x0)                             # (batch,)
                 xt = sqrt_alpha * x0 + sigma * eps                     # (batch,)
 
-                # target from DSM: -(eps / sigma)
-                target = -(eps / sigma)
+                # normalize timestep for embedding (in [0,1])
+                t_norm = t_idx.float() / (self.n_steps - 1)
 
-                # predict score
-                scores_pred = model(xt, t_idx).view(-1)                # (batch,)
+                # predict score (model should accept normalized t)
+                scores_pred = model(xt, t_norm).view(-1)               # (batch,)
 
-                # loss
-                loss = loss_fn(scores_pred, target)
+                # stable DSM loss: weight by sigma^2 -> equivalent to MSE(scores_pred * sigma, -eps)
+                loss = loss_fn(scores_pred * sigma, -eps)
 
                 optimizer.zero_grad()
                 loss.backward()
+                if clip_grad is not None:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
                 optimizer.step()
 
                 total_loss += float(loss.item())
@@ -167,6 +165,7 @@ class VPSDE(DiffusionModel):
             print(f"[DSM] Epoch {epoch+1}/{n_epochs} - Loss: {avg_loss:.6f}")
 
         return model, losses
+
 
 
     def train_score_network_fisher(self, n_epochs=50, batch_size=128, lr=1e-3, n_steps=1000):
