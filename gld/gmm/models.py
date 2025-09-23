@@ -18,7 +18,7 @@ class SinusoidalTimeEmbedding(nn.Module):
         return emb
 
 class ScoreNetwork(nn.Module):
-    def __init__(self, hidden_dim=128, time_emb_dim=32):
+    def __init__(self, hidden_dim=256, time_emb_dim=64):
         super().__init__()
         self.time_emb = SinusoidalTimeEmbedding(time_emb_dim)
         self.time_mlp = nn.Sequential(
@@ -45,7 +45,7 @@ class ScoreNetwork(nn.Module):
 
 
 class CLDScoreNetwork(nn.Module):
-    def __init__(self, hidden_dim=64, time_emb_dim=16):
+    def __init__(self, hidden_dim=256, time_emb_dim=64):
         super().__init__()
         self.time_emb = SinusoidalTimeEmbedding(time_emb_dim)
         self.mlp = nn.Sequential(
@@ -69,7 +69,7 @@ class GLDScoreNetwork(nn.Module):
     Inputs: (p, s) of shape (batch, 2), time index t_idx of shape (batch,)
     Outputs: score estimate of shape (batch, 2).
     """
-    def __init__(self, hidden_dim=128, time_emb_dim=32):
+    def __init__(self, hidden_dim=256, time_emb_dim=64):
         super().__init__()
         self.time_emb = SinusoidalTimeEmbedding(time_emb_dim)
         self.mlp = nn.Sequential(

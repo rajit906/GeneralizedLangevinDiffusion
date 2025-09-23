@@ -16,14 +16,14 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
     The state vector is z = [x, p, s], representing position, momentum, and an auxiliary variable.
     Forward SDE: dz = -beta * A * z * dt + G * dW
     """
-    def __init__(self, gmm_params, inttype= 'em', gamma=1.0,lambda_val=1.0, c_val = 0.0, M=1.0, **kwargs):
+    def __init__(self, gmm_params, inttype= 'em', gamma=1.0,lambda_val=1.0, c_val = 0.1, M=1., **kwargs):
         super().__init__('Generalized Langevin Diffusion', gmm_params, **kwargs)
         # --- Model Parameters ---
         self.inttype = inttype
         self.gamma = gamma
         self.c = c_val
         self.lambda_val = lambda_val
-        self.M = 1.
+        self.M = M
         self.M_inv = 1. / self.M
         self.beta = 8. * np.sqrt(self.M)
 
@@ -467,7 +467,7 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         s0 = torch.randn(n_plot, device=DEVICE) * np.sqrt(self.s_init_var)
         z0 = torch.stack([x0, p0, s0], dim=-1)
 
-        forward_sde_paths = self.solve_forward_sde(z0, type='em').cpu().numpy()
+        forward_sde_paths = self.solve_forward_sde(z0, type='sscs').cpu().numpy()
 
         xT_hist = torch.randn(n_hist, device=DEVICE)
         pT_hist = torch.randn(n_hist, device=DEVICE) * np.sqrt(self.M)
@@ -486,13 +486,11 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
             axes[i, 0].plot(ts_cpu, forward_sde_paths[:10, :, i].T, lw=1.5, alpha=1, color='darkblue')
             axes[i, 0].set_title(f'Forward: {var_names[i]}')
             axes[i, 0].set_ylabel(var_names[i])
-            axes[i, 0].set_ylim(-6, 6)
 
             # Reverse trajectories
             axes[i, 1].plot(ts_cpu, reverse_sde_paths[10:n_plot, :, i].T, lw=1.5, alpha=0.05, color='darkblue')
             axes[i, 1].plot(ts_cpu, reverse_sde_paths[:10, :, i].T, lw=1.5, alpha=1, color='darkblue')
             axes[i, 1].set_title(f'Reverse: {var_names[i]}')
-            axes[i, 1].set_ylim(-6, 6)
 
             if i == 2:
                 axes[i, 0].set_xlabel('Time')
@@ -512,17 +510,14 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         # Call plotting functions without the 'color' argument to fix the TypeError
         plot_position_dist(position_filtered, self.gmm_params, axes[0, 2])
         axes[0, 2].set_title("Final Position Distribution (Reverse)")
-        axes[0, 2].set_xlim(-10, 10)
 
         plot_aux_dist(axes[1, 2], (momentum_filtered, 'Momentum'),
                     target_dist=(0, np.sqrt(self.p_init_var)))
         axes[1, 2].set_title("Final Momentum Distribution (Reverse)")
-        axes[1, 2].set_xlim(-6, 6)
 
         plot_aux_dist(axes[2, 2], (memory_filtered, 'Memory'),
                     target_dist=(0, np.sqrt(self.s_init_var)))
         axes[2, 2].set_title("Final Memory Distribution (Reverse)")
-        axes[2, 2].set_xlim(-6, 6)
 
         plt.tight_layout(rect=[0, 0, 1, 0.96])
         plt.show()
@@ -530,8 +525,13 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
 
     def train_score_network_hsm(self, ScoreNetwork, n_epochs=50, batch_size=128, lr=1e-3, n_steps=1000):
         """
-        Train score network for GLD using Hybrid Score Matching (HSM).
-        Network predicts the conditional score of (p,s) given x0.
+        Train score network for GLD using Hybrid Score Matching (HSM), but using
+        a noise-regression reparameterized loss while the model still predicts
+        the score (for (p,s)). This trains the network to output the score,
+        but the loss is equivalent to regressing the noise eps on the (p,s)
+        subspace which stabilizes training. We sample a single time index uniformly 
+        for each minibatch (same t for all samples in the batch). We should extend 
+        it to sample random times for each sample.
         """
         device = DEVICE
         model = ScoreNetwork().to(device)
@@ -540,41 +540,75 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
 
         losses = []
 
+        K = len(self.gmm_params['weights'])
+        weights_tensor = torch.tensor(self.gmm_params['weights'], device=device, dtype=torch.float32)
+        # normalize in case
+        weights_tensor = weights_tensor / weights_tensor.sum()
+
         for epoch in range(n_epochs):
             total_loss = 0.0
-            for _ in range(n_steps):
-                # --- 1. Sample initial data (x0 from dataset, p0=s0=0 for HSM kernel) ---
+            for step in range(n_steps):
+                # --- 1. Sample initial x0 (we only need it to sample conditional kernels via components) ---
                 x0 = self._get_initial_samples(batch_size).to(device)  # (B,)
-                z0 = torch.stack([x0, torch.zeros_like(x0), torch.zeros_like(x0)], dim=1)  # (B,3)
 
-                # --- 2. Sample random time index ---
-                t_idx = torch.randint(0, self.n_steps, (batch_size,), device=device)
-                t = self.ts[t_idx].to(device)  # continuous times
+                # --- 2. Sample single time index for this minibatch (same t for all samples) ---
+                t_idx_scalar = int(torch.randint(0, self.n_steps, (1,)).item())
+                t = self.ts[t_idx_scalar].item()
 
-                # --- 3. Perturbation kernel mean/cov ---
-                # For each component, compute mean_t, Sigma_t
-                weights, means, covs = self._get_perturbed_params(t[0].item())
-                mu_t = means[0]  # just use one GMM component (extend if needed)
-                Sigma_t = covs[0]
+                # --- 3. Get perturbed params for this t (lists of K means/covs) ---
+                # _get_perturbed_params returns (weights_list, means_list, covs_list)
+                _, means_list, covs_list = self._get_perturbed_params(t)
+                # Stack into tensors: means: (K,3), covs: (K,3,3)
+                means_K = torch.stack(means_list, dim=0).to(device)   # (K,3)
+                covs_K = torch.stack(covs_list, dim=0).to(device)     # (K,3,3)
 
-                # Cholesky factorization
-                L_t = torch.linalg.cholesky(Sigma_t + 1e-6 * torch.eye(3, device=device))
+                # --- 4. Sample mixture components for each sample in batch ---
+                comp_idx = torch.multinomial(weights_tensor, batch_size, replacement=True)  # (B,)
+                # Gather mu_t and Sigma_t per sample:
+                mu_t_batch = means_K[comp_idx]   # (B,3)
+                Sigma_t_batch = covs_K[comp_idx] # (B,3,3)
 
-                # --- 4. Reparametrization ---
-                eps = torch.randn(batch_size, 3, device=device)
-                z_t = mu_t + eps @ L_t.T  # (B,3)
+                # --- 5. Cholesky factor (batched) for Sigma_t_batch ---
+                # Add small jitter for stability
+                jitter = 1e-6
+                # Sigma_t_batch is (B,3,3); cholesky supports batched input
+                L_t_batch = torch.linalg.cholesky(Sigma_t_batch + jitter * torch.eye(3, device=device).unsqueeze(0))  # (B,3,3)
 
-                # --- 5. Target score (only for (p,s)) ---
-                # Conditional score wrt (p,s) is - (L_t^-T eps) restricted to indices 1,2
-                score_full = -torch.cholesky_inverse(L_t).T @ eps.T  # (3,B)
-                target = score_full[1:, :].T  # (B,2) → momentum + memory
+                # --- 6. Reparameterize: sample eps ~ N(0,I) and form z_t = mu_t + L_t @ eps ---
+                eps = torch.randn(batch_size, 3, device=device)  # (B,3)
+                # compute eps @ L_t^T per sample, using bmm:
+                eps_unsq = eps.unsqueeze(1)           # (B,1,3)
+                L_t_trans = L_t_batch.transpose(1, 2) # (B,3,3) -> (B,3,3) transpose but we want eps @ L^T
+                z_t = mu_t_batch + torch.bmm(eps_unsq, L_t_trans).squeeze(1)  # (B,3)
 
-                # --- 6. Network prediction ---
-                ps = z_t[:, 1:]  # (p,s), shape (B,2)
-                scores_pred = model(ps, t_idx)  # (B,2)
+                # --- 7. Build target score (full 3-d): score = - L^{-T} eps ---
+                # Solve L_t^T @ score_full = -eps   -> score_full = - (L_t^T)^{-1} eps
+                # Use torch.linalg.solve with batched inputs
+                rhs = -eps.unsqueeze(-1)  # (B,3,1)
+                score_full_target = torch.linalg.solve(L_t_trans, rhs).squeeze(-1)  # (B,3)
 
-                # --- 7. Loss ---
-                loss = loss_fn(scores_pred, target)
+                # We only need the (p,s) components as training target for the network
+                target_ps = score_full_target[:, 1:]  # (B,2)
+
+                # --- 8. Network prediction (model outputs score on (p,s) given ps and t) ---
+                ps_inputs = z_t[:, 1:]  # (B,2)
+                # model expects a t_idx tensor. Make same t for whole batch:
+                t_idx_tensor = torch.full((batch_size,), t_idx_scalar, device=device, dtype=torch.long)
+                score_ps_pred = model(ps_inputs, t_idx_tensor)  # (B,2)
+
+                # --- 9. Reparameterized loss: convert predicted score back to eps-space and match noise ---
+                # Form full predicted score vector by inserting zero for x-component
+                zeros_x = torch.zeros(batch_size, 1, device=device)
+                score_full_pred = torch.cat([zeros_x, score_ps_pred], dim=1)  # (B,3)
+
+                # predicted eps_hat = - L_t^T @ score_full_pred
+                eps_hat = -torch.bmm(L_t_trans, score_full_pred.unsqueeze(-1)).squeeze(-1)  # (B,3)
+
+                # Compare only the (p,s) components of eps (since only those were actually perturbed / learned)
+                eps_target_ps = eps[:, 1:]    # (B,2)
+                eps_hat_ps = eps_hat[:, 1:]   # (B,2)
+
+                loss = loss_fn(eps_hat_ps, eps_target_ps)
 
                 optimizer.zero_grad()
                 loss.backward()
