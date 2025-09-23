@@ -242,18 +242,18 @@ class CriticallyDampedLangevin(DiffusionModel):
         axes[0, 0].plot(ts_cpu, forward_paths[:10, :, 0].T, lw=1.5, color='darkblue', alpha=1.0)
         axes[0, 0].set_title('Forward: Position')
         axes[0, 0].set_ylabel('Position')
-        axes[0, 0].set_ylim(-60, 60)
+        axes[0, 0].set_ylim(-6, 6)
 
         # Reverse trajectories
         axes[0, 1].plot(ts_cpu, reverse_sde_paths[10:n_plot, :, 0].T, lw=1.5, color='darkblue', alpha=0.05)
         axes[0, 1].plot(ts_cpu, reverse_sde_paths[:10, :, 0].T, lw=1.5, color='darkblue', alpha=1.0)
         axes[0, 1].set_title('Reverse: Position')
-        axes[0, 1].set_ylim(-60, 60)
+        axes[0, 1].set_ylim(-6, 6)
 
         # Final distribution
         plot_position_dist(reverse_sde_paths[:, 0, 0], self.gmm_params, axes[0, 2])
         axes[0, 2].set_title("Final Position Distribution")
-        axes[0, 2].set_xlim(-60, 60)
+        axes[0, 2].set_xlim(-6, 6)
 
         # --- Momentum Plots ---
         # Forward trajectories
@@ -262,19 +262,19 @@ class CriticallyDampedLangevin(DiffusionModel):
         axes[1, 0].set_title('Forward: Momentum')
         axes[1, 0].set_xlabel('Time')
         axes[1, 0].set_ylabel('Momentum')
-        axes[1, 0].set_ylim(-60, 60)
+        axes[1, 0].set_ylim(-6, 6)
 
         # Reverse trajectories
         axes[1, 1].plot(ts_cpu, reverse_sde_paths[10:n_plot, :, 1].T, lw=1.5, color='darkblue', alpha=0.05)
         axes[1, 1].plot(ts_cpu, reverse_sde_paths[:10, :, 1].T, lw=1.5, color='darkblue', alpha=1.0)
         axes[1, 1].set_title('Reverse: Momentum')
         axes[1, 1].set_xlabel('Time')
-        axes[1, 1].set_ylim(-60, 60)
+        axes[1, 1].set_ylim(-6, 6)
         
         # Final distribution
         plot_aux_dist(axes[1, 2], (reverse_sde_paths[:, 0, 1], 'Momentum'), target_dist=(0, np.sqrt(self.v_init_var)))
         axes[1, 2].set_title("Final Momentum Distribution")
-        axes[1, 2].set_xlim(-40, 40)
+        axes[1, 2].set_xlim(-4, 4)
         
         plt.tight_layout(rect=[0, 0, 1, 0.96])
         plt.show()

@@ -59,6 +59,7 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         self.AH_np = self.AH.cpu().numpy()
         self.AGamma_np = self.AGamma.cpu().numpy()
         self.F_half_np = scipy.linalg.expm( self.beta * (self.AH_np-self.AGamma_np) * dt/2)
+        self.F_rev_half_np = scipy.linalg.expm( self.beta * (self.AH_np+self.AGamma_np) * dt/2)
         self.Ft_half_np = scipy.linalg.expm(self.beta * (2*self.AGamma_np) * dt/2)
         #print("F_half_np = ", self.F_half_np)
         self.S_half_np = np.linalg.cholesky(np.eye(3) - self.F_half_np @ self.F_half_np.T)
@@ -397,6 +398,55 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
 
         return zs
     
+    def precompute_sscs4(self):
+        self.F_half = torch.from_numpy(self.F_half_np).float().to(DEVICE)
+        self.S_half = torch.from_numpy(self.S_half_np).float().to(DEVICE)
+        self.Ft_half = torch.from_numpy(self.Ft_half_np).float().to(DEVICE)
+        self.F_rev_half = torch.from_numpy(self.F_rev_half_np).float().to(DEVICE)
+        print("F_rev_half = ", self.F_rev_half)
+        
+    def solve_reverse_sde_sscs4(self, zT):
+        """
+        Solves the reverse SDE using a symmetric splitting integrator:
+        (At_H(dt/2) + At_O(dt/2)) -> S(dt) -> (At_O(dt/2) + At_H(dt/2))
+        """
+        zs = torch.zeros_like(zT).unsqueeze(1).repeat(1, self.n_steps, 1)
+        zs[:, -1, :] = zT
+        
+        dt_half = self.dt / 2.0
+        dt_half_sqrt = torch.sqrt(dt_half) 
+        two_beta_sqrt = torch.sqrt(torch.tensor(2*self.beta)).to(DEVICE)
+        for i in range(self.n_steps - 1, 0, -1):
+            z1 = zs[:, i, :]
+            t_idx = i
+
+            # --- Step 1: Hamiltonian Half-Step (A_H for dt/2) ---
+            # x, p, s = z.split(1, dim=-1)
+            # p1 = p + (self.beta * x) * dt_half
+            # x1 = x - (self.beta * self.M_inv * p1) * dt_half
+            # z1 = torch.cat([x1, p1, s], dim=-1)
+
+            # --- Step 2: Ornstein-Uhlenbeck Half-Step (A_O for dt/2) ---
+            # Apply pre-computed drift and diffusion
+            z2_drift = (self.F_rev_half  @ z1.T).T
+            noise1 = (self.B @ torch.randn_like(z1).T).T
+            z2 = z2_drift + two_beta_sqrt * dt_half_sqrt * noise1
+
+            
+            # # --- Step 3: Score Full-Euler-Step (S for dt) ---
+            score_old = self._score_fn(z2, t_idx)
+            score_drift_old = (self.GGt @ score_old.T).T
+            z3 = z2 + score_drift_old * self.dt
+            
+            noise2 = (self.B @ torch.randn_like(z3).T).T
+            z3t = z3 + two_beta_sqrt * dt_half_sqrt * noise2
+            z4 = (self.F_rev_half  @ z3t.T).T
+            
+            
+            zs[:, i-1, :] = z4
+
+        return zs
+
     def precompute_sscs3(self):
         self.F_half = torch.from_numpy(self.F_half_np).float().to(DEVICE)
         self.S_half = torch.from_numpy(self.S_half_np).float().to(DEVICE)
@@ -432,8 +482,6 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
             
             # # --- Step 3: Score Full-Euler-Step (S for dt) ---
             score_old = self._score_fn(z2t, t_idx)
-            # #print((score_old.T).size())
-            # #print((z2.T).size())
             score_drift_old = (self.GGt @ score_old.T).T
             z3 = z2t + score_drift_old * self.dt
             
@@ -469,6 +517,9 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         elif type == 'sscs3':
             self.precompute_sscs3()
             return self.solve_reverse_sde_sscs3(zT)
+        elif type == 'sscs4':
+            self.precompute_sscs4()
+            return self.solve_reverse_sde_sscs4(zT)
         elif type == 'ubu':
             return self.solve_reverse_sde_ubu(zT)
         
