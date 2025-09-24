@@ -25,7 +25,7 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         self.lambda_val = lambda_val
         self.M = M
         self.M_inv = 1. / self.M
-        self.beta = 8. * np.sqrt(self.M)
+        self.beta = 24. * np.sqrt(self.M)
 
         self.p_init_var = 1.#0.01 * self.M
         self.s_init_var = 1.#0.04
