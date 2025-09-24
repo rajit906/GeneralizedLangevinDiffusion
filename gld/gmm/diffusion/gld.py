@@ -503,9 +503,9 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         momentum_data = reverse_sde_paths[:, 0, 1]
         memory_data  = reverse_sde_paths[:, 0, 2]
 
-        position_filtered = position_data[np.abs(position_data) <= 100]
-        momentum_filtered = momentum_data[np.abs(momentum_data) <= 100]
-        memory_filtered   = memory_data[np.abs(memory_data) <= 100]
+        position_filtered = position_data#[np.abs(position_data) <= 100]
+        momentum_filtered = momentum_data#[np.abs(momentum_data) <= 100]
+        memory_filtered   = memory_data#[np.abs(memory_data) <= 100]
 
         # Call plotting functions without the 'color' argument to fix the TypeError
         plot_position_dist(position_filtered, self.gmm_params, axes[0, 2])
@@ -527,7 +527,8 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         """
         Hybrid Score Matching with noise regression and GG^T-weighted loss.
         The model predicts the score on (p,s), we reparametrize to eps,
-        and weight the regression loss with ||·||_{GG^T}.
+        and weight the regression loss with ||·||_{GG^T}. 
+        TODO: Make sure perturbation kernel has correct initialization.
         """
         device = DEVICE
         model = ScoreNetwork().to(device)

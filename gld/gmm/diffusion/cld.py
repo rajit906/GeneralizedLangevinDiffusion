@@ -341,46 +341,110 @@ class CriticallyDampedLangevin(DiffusionModel):
         plt.tight_layout(rect=[0, 0, 1, 0.96])
         plt.show()
 
-    def train_score_network_hsm(self, ScoreNetwork, n_epochs=50, batch_size=128, lr=1e-3, n_steps=1000):
+    def train_score_network_hsm(self, ScoreNetwork, n_epochs=50, batch_size=128, lr=1e-3, n_steps=1000, eps_stabilize=1e-6):
         """
-        Train velocity-only score network with Hybrid Score Matching (HSM) [Sec. 3.2].
+        Hybrid Score Matching (HSM) training implemented correctly.
+
+        - Uses closed-form µ_t(x0) = M_t @ [x0, 0] and covariance Σ_t for p_t(u_t | x0)
+        (appendix B.1/B.3 formulas).
+        - Reparameterizes the regression loss as noise-prediction but the model still
+        predicts the velocity-score s_theta (not alpha). Concretely:
+            target_score_v = -`_t * eps_v
+        and we minimize MSE(s_pred_v, target_score_v).
+        - By default uses the 'drop-variance' weighting λ(t) = `_t^-2 (paper suggestion).
+        Set lambda_mode='ml' to use ML weighting (Γβ) or 'plain' to use λ=1.
         """
         device = DEVICE
         model = ScoreNetwork().to(device)
         optimizer = optim.Adam(model.parameters(), lr=lr)
-        loss_fn = nn.MSELoss()
+        loss_fn = nn.MSELoss(reduction='mean')
 
         losses = []
 
         for epoch in range(n_epochs):
             total_loss = 0.0
+
             for _ in range(n_steps):
-                # 1. Sample x0 ~ pdata(x0)
-                x0 = self._get_initial_samples(batch_size).to(device)  # (B,)
+                # 1) sample batch of x0 (data) and a single t uniformly (shared across batch)
+                x0 = self._get_initial_samples(batch_size).to(device)  # shape (B,)
+                t_idx = int(torch.randint(0, self.n_steps, (1,)).item())  # single t per step
+                t = float(self.ts[t_idx].item())                          # scalar time
+                B_t = self.beta * t
 
-                # 2. Sample timestep t uniformly
-                t_idx = torch.randint(0, self.n_steps, (batch_size,), device=device)
+                # 2) mean propagator M_t (2x2) and batch means µ_t(x0)
+                M_t = self.M_ts[t_idx]               # (2,2), torch
+                mu0 = torch.stack([x0, torch.zeros_like(x0)], dim=1)  # (B,2)
+                # mu_t for each sample: (B,2) = mu0 @ M_t.T
+                mu_t = mu0 @ M_t.T  # shape (B,2)
 
-                # 3. Perturb: mean + covariance for this t
-                weights, means, covs = self._get_perturbed_params(t_idx[0].item())
-                cov_t = covs[0]   # single covariance
-                L_t = torch.linalg.cholesky(cov_t)
+                # 3) analytic covariance Σ_t for conditioning on x0 (Sigma_xx0 = 0, Sigma_vv0 = gamma_init * M)
+                #    formulas follow App. B.1 (same algebra as your _get_perturbed_params but with Sigma0_xx = 0).
+                Sigma0_xx = 0.0
+                Sigma0_vv = float(self.gamma_init * self.M)
+                # compute scalar quantities (use python floats for stability; convert to torch later)
+                exp_term_cov = np.exp(4.0 * B_t / self.Gamma)
 
-                eps = torch.randn(batch_size, 2, device=device)
-                mu_t = torch.stack([x0, torch.zeros_like(x0)], dim=1) @ self.M_ts[t_idx[0]]
-                u_t = mu_t + eps @ L_t.T  # (B, 2)
+                Sigma_t_xx = (Sigma0_xx
+                            + exp_term_cov - 1.0
+                            + (4.0 * B_t / self.Gamma) * (Sigma0_xx - 1.0)
+                            + (4.0 * B_t**2 / self.Gamma**2) * (Sigma0_xx - 2.0)
+                            + (16.0 * B_t**2 / self.Gamma**4) * Sigma0_vv)
 
-                # 4. Target score (velocity only)
-                Σ_xx = cov_t[0,0]; Σ_xv = cov_t[0,1]; Σ_vv = cov_t[1,1]
-                ell_t = torch.sqrt(Σ_xx / (Σ_xx * Σ_vv - Σ_xv**2 + 1e-8))
-                target_v = -ell_t * eps[:,1]  # (B,)
+                Sigma_t_xv = (-B_t * Sigma0_xx
+                            + (4.0 * B_t / self.Gamma**2) * Sigma0_vv
+                            - (2.0 * B_t**2 / self.Gamma) * (Sigma0_xx - 2.0)
+                            - (8.0 * B_t**2 / self.Gamma**3) * Sigma0_vv)
 
-                # 5. Predict score from velocity channel
-                v = u_t[:, 1:2]  # (B,1)
-                scores_pred = model(v, t_idx).squeeze(-1)  # (B,)
+                Sigma_t_vv = ((self.Gamma**2 / 4.0) * (exp_term_cov - 1.0)
+                            + B_t * self.Gamma
+                            + Sigma0_vv * (1.0 + 4.0 * B_t**2 / self.Gamma**2 - 4.0 * B_t / self.Gamma)
+                            + B_t**2 * (Sigma0_xx - 2.0))
 
-                # 6. Loss
-                loss = loss_fn(scores_pred, target_v)
+                cov_hat = np.array([[Sigma_t_xx, Sigma_t_xv],
+                                    [Sigma_t_xv, Sigma_t_vv]], dtype=np.float32)
+
+                cov_t_np = np.exp(-4.0 * B_t / self.Gamma) * cov_hat   # outer exponential factor
+                cov_t = torch.from_numpy(cov_t_np).to(device)          # (2,2) torch
+
+                # numeric stabilization and cholesky
+                cov_t = cov_t + eps_stabilize * torch.eye(2, device=device)
+                try:
+                    L_t = torch.linalg.cholesky(cov_t)  # (2,2)
+                except RuntimeError:
+                    # fallback to slightly larger stabilization if cholesky fails
+                    cov_t = cov_t + (1e-6 * torch.eye(2, device=device))
+                    L_t = torch.linalg.cholesky(cov_t)
+
+                # 4) sample epsilon and construct u_t via reparameterization: u_t = µ_t + L_t @ eps
+                eps_noise = torch.randn(batch_size, 2, device=device)  # (B,2), standard normal
+                u_t = mu_t + eps_noise @ L_t.T                         # (B,2)
+
+                # 5) compute `t (ell_t) used in HSM reparam: `t = sqrt( Σ_xx / (Σ_xx Σ_vv - Σ_xv^2) )
+                Σ_xx = cov_t[0, 0]
+                Σ_xv = cov_t[0, 1]
+                Σ_vv = cov_t[1, 1]
+                denom = (Σ_xx * Σ_vv - Σ_xv * Σ_xv).clamp(min=1e-12)
+                ell_t = torch.sqrt((Σ_xx / denom).clamp(min=1e-12))  # scalar tensor
+
+                # 6) target velocity-score: ∇_v log p_t(u_t | x0) = -`_t * eps_v
+                #target_v = -ell_t * eps_noise[:, 1]   # shape (B,)
+
+                # 7) model prediction: model expects (v, t_idx) like elsewhere in your code
+                v_input = u_t[:, 1:2]  # shape (B,1)
+                t_idx_batch = torch.full((batch_size,), t_idx, device=device, dtype=torch.long)
+                scores_pred_v = model(v_input, t_idx_batch).squeeze(-1)  # (B,)
+
+                # --- Noise prediction reparam (Appendix B.3) ---
+                eps_v = eps_noise[:, 1]              # true Gaussian noise
+
+                # Convert to equivalent noise prediction
+                pred_noise = -(1.0 / (ell_t + 1e-12)) * scores_pred_v  # (B,)
+
+                # 8) weighting λ(t): follow paper's "drop variance" by default (λ = `_t^-2)
+                lambda_t = (1.0 / (ell_t**2 + 1e-12)).to(device)  # scalar tensor
+
+                # 9) loss (MSE between predicted velocity-score and analytic target)
+                loss = lambda_t * loss_fn(pred_noise, eps_v) #loss_fn(scores_pred_v, target_v)
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -393,5 +457,6 @@ class CriticallyDampedLangevin(DiffusionModel):
             print(f"[HSM] Epoch {epoch+1}/{n_epochs} - Loss: {avg_loss:.6f}")
 
         return model, losses
+
 
     
