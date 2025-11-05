@@ -7,3 +7,6 @@ gld/datasets/__pycache__/
 gld/checkpoints/
 cld/results/
 cld/data/
+*.pt
+*.png
+*.pdf

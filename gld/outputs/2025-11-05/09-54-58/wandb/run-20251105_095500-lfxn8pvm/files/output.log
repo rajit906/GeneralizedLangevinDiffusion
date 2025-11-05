@@ -1,0 +1,122 @@
+--- Initializing GLDSDE (Data Dim: 2) ---
+Calculating stationary covariance...
+GLDSDE Initialized.
+Sanity Checking DataLoader 0: 100%|█████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:00<00:00, 396.04it/s]Generating 2 samples with GLD Sampler...
+  | Name  | Type   | Params
+---------------------------------
+0 | model | ResNet | 67.3 K
+---------------------------------
+67.3 K    Trainable params
+0         Non-trainable params
+67.3 K    Total params
+0.269     Total estimated model params size (MB)
+/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/site-packages/pytorch_lightning/trainer/connectors/data_connector.py:441: The 'val_dataloader' does not have many workers which may be a bottleneck. Consider increasing the value of the `num_workers` argument` to `num_workers=7` in the `DataLoader` to improve performance.
+
+
+
+
+
+
+/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/site-packages/pytorch_lightning/trainer/connectors/data_connector.py:436: Consider setting `persistent_workers=True` in 'train_dataloader' to speed up the dataloader worker initialization.
+
+
+
+
+
+
+
+
+Epoch 4: 100%|████████████████████████████████████████████████████| 18/18 [00:19<00:00,  0.91it/s, v_num=8pvm, train_loss_step=0.00807, train_loss_epoch=0.149]Generating 500 samples with GLD Sampler...
+
+
+
+
+
+
+GLD Reverse SDE Sampler:  88%|██████████████████████████████████████████████████████████████████████████████████▎           | 876/1000 [00:12<00:01, 63.27it/s]
+
+
+
+
+
+
+
+Epoch 9:   0%|                                              | 0/18 [00:00<?, ?it/s, v_num=8pvm, train_loss_step=0.00284, train_loss_epoch=0.150, val_mmd=0.883]
+
+
+
+GLD Reverse SDE Sampler:  99%|████████████████████████████████████████████████████████████████████████████████████████████▎| 993/1000 [00:03<00:00, 272.29it/s]
+
+
+
+
+
+Epoch 14:   0%|                                  | 0/18 [00:00<?, ?it/s, v_num=8pvm, train_loss_step=0.123, train_loss_epoch=0.124, val_mmd=0.882]
+
+
+
+GLD Reverse SDE Sampler:  97%|██████████████████████████████████████████████████████████████████████████████▋  | 972/1000 [00:02<00:00, 347.38it/s]
+
+
+
+
+
+
+Epoch 19: 100%|██████████████████████| 18/18 [00:13<00:00,  1.38it/s, v_num=8pvm, train_loss_step=0.000604, train_loss_epoch=0.0413, val_mmd=0.883]Generating 500 samples with GLD Sampler...
+
+GLD Reverse SDE Sampler:  99%|███████████████████████████████████████████████████████████████████████████████▊ | 986/1000 [00:03<00:00, 343.46it/s]
+
+
+
+
+
+Epoch 24:  56%|████████████▊          | 10/18 [00:10<00:08,  0.92it/s, v_num=8pvm, train_loss_step=0.00068, train_loss_epoch=0.0174, val_mmd=0.883]
+
+
+GLD Reverse SDE Sampler: 100%|████████████████████████████████████████████████████████████████████████████████| 1000/1000 [00:02<00:00, 360.07it/s]
+
+
+
+
+
+Epoch 29:   0%|                                | 0/18 [00:00<?, ?it/s, v_num=8pvm, train_loss_step=0.000808, train_loss_epoch=0.108, val_mmd=0.882]
+
+
+
+GLD Reverse SDE Sampler:  98%|███████████████████████████████████████████████████████████████████████████████▎ | 979/1000 [00:02<00:00, 377.09it/s]
+
+
+
+
+Epoch 34:   0%|                                 | 0/18 [00:00<?, ?it/s, v_num=8pvm, train_loss_step=0.00114, train_loss_epoch=1.160, val_mmd=0.883]
+
+
+GLD Reverse SDE Sampler:  98%|███████████████████████████████████████████████████████████████████████████████▌ | 982/1000 [00:02<00:00, 377.50it/s]
+
+
+
+
+Epoch 39:   0%|                                 | 0/18 [00:00<?, ?it/s, v_num=8pvm, train_loss_step=0.0875, train_loss_epoch=0.0305, val_mmd=0.883]
+
+
+GLD Reverse SDE Sampler:  91%|█████████████████████████████████████████████████████████████████████████▊       | 911/1000 [00:02<00:00, 376.16it/s]
+
+
+
+
+
+
+Epoch 44:  56%|██████████████▍           | 10/18 [00:09<00:07,  1.07it/s, v_num=8pvm, train_loss_step=2.070, train_loss_epoch=0.177, val_mmd=0.883]
+
+
+GLD Reverse SDE Sampler:  98%|███████████████████████████████████████████████████████████████████████████████▊ | 985/1000 [00:02<00:00, 370.48it/s]
+
+
+
+
+Epoch 49:   0%|                                 | 0/18 [00:00<?, ?it/s, v_num=8pvm, train_loss_step=0.0471, train_loss_epoch=0.0576, val_mmd=0.883]
+
+
+
+`Trainer.fit` stopped: `max_epochs=50` reached.█████████████████████████████████████████████████████████████▌  | 970/1000 [00:02<00:00, 372.29it/s]
+Epoch 49: 100%|██████████████████████| 18/18 [00:13<00:00,  1.37it/s, v_num=8pvm, train_loss_step=0.000356, train_loss_epoch=0.0381, val_mmd=0.883]

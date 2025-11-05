@@ -1,0 +1,29 @@
+2025-11-05 10:16:27,454 INFO    MainThread:40510 [wandb_setup.py:_flush():76] Current SDK version is 0.17.0
+2025-11-05 10:16:27,455 INFO    MainThread:40510 [wandb_setup.py:_flush():76] Configure stats pid to 40510
+2025-11-05 10:16:27,455 INFO    MainThread:40510 [wandb_setup.py:_flush():76] Loading settings from /Users/rajit906/.config/wandb/settings
+2025-11-05 10:16:27,455 INFO    MainThread:40510 [wandb_setup.py:_flush():76] Loading settings from /Users/rajit906/Downloads/PhD/PhD_Research/Current/GeneralizedLangevinDiffusion/gld/outputs/2025-11-05/10-16-25/wandb/settings
+2025-11-05 10:16:27,455 INFO    MainThread:40510 [wandb_setup.py:_flush():76] Loading settings from environment variables: {}
+2025-11-05 10:16:27,455 INFO    MainThread:40510 [wandb_setup.py:_flush():76] Applying setup settings: {'_disable_service': False}
+2025-11-05 10:16:27,455 INFO    MainThread:40510 [wandb_setup.py:_flush():76] Inferring run settings from compute environment: {'program_relpath': 'gld/train_gld.py', 'program_abspath': '/Users/rajit906/Downloads/PhD/PhD_Research/Current/GeneralizedLangevinDiffusion/gld/train_gld.py', 'program': '/Users/rajit906/Downloads/PhD/PhD_Research/Current/GeneralizedLangevinDiffusion/gld/train_gld.py'}
+2025-11-05 10:16:27,455 INFO    MainThread:40510 [wandb_setup.py:_flush():76] Applying login settings: {}
+2025-11-05 10:16:27,455 INFO    MainThread:40510 [wandb_init.py:_log_setup():520] Logging user logs to ./wandb/run-20251105_101627-orw1edrr/logs/debug.log
+2025-11-05 10:16:27,455 INFO    MainThread:40510 [wandb_init.py:_log_setup():521] Logging internal logs to ./wandb/run-20251105_101627-orw1edrr/logs/debug-internal.log
+2025-11-05 10:16:27,455 INFO    MainThread:40510 [wandb_init.py:init():560] calling init triggers
+2025-11-05 10:16:27,455 INFO    MainThread:40510 [wandb_init.py:init():567] wandb.init called with sweep_config: {}
+config: {'sde': {'T': 1.0, 'n_steps': 1000, 'gamma': 1.0, 'lambda_val': 1.0, 'c_val': 0.1, 'M': 1.0, 'beta': 8.0, 'p_init_var': 1.0, 's_init_var': 1.0}, 'model': {'name': 'resnet', 'data_dim': 2, 'ps_dim': 4, 'input_dim': 4, 'index_dim': 1, 'hidden_dim': 128, 'n_hidden_layers': 4}, 'training': {'lr': 0.0001, 'n_epochs': 50, 'ema_decay': 0.999, 'n_val_steps': 500, 'n_plot_samples': 500, 'val_every_n_epoch': 5, 'batch_size': 256}, 'data': {'n_points': 5000, 'noise': 0.5}, 'wandb': {'project': 'swissroll', 'entity': 'rajit906', 'name': 'vpsde-mlp-swissroll-run', 'log_model': True}}
+2025-11-05 10:16:27,455 INFO    MainThread:40510 [wandb_init.py:init():610] starting backend
+2025-11-05 10:16:27,455 INFO    MainThread:40510 [wandb_init.py:init():614] setting up manager
+2025-11-05 10:16:27,464 INFO    MainThread:40510 [backend.py:_multiprocessing_setup():105] multiprocessing start_methods=spawn,fork,forkserver, using: spawn
+2025-11-05 10:16:27,465 INFO    MainThread:40510 [wandb_init.py:init():622] backend started and connected
+2025-11-05 10:16:27,475 INFO    MainThread:40510 [wandb_init.py:init():711] updated telemetry
+2025-11-05 10:16:27,496 INFO    MainThread:40510 [wandb_init.py:init():744] communicating run to backend with 90.0 second timeout
+2025-11-05 10:16:28,483 INFO    MainThread:40510 [wandb_run.py:_on_init():2396] communicating current version
+2025-11-05 10:16:28,648 INFO    MainThread:40510 [wandb_run.py:_on_init():2405] got version response upgrade_message: "wandb version 0.22.3 is available!  To upgrade, please run:\n $ pip install wandb --upgrade"
+
+2025-11-05 10:16:28,650 INFO    MainThread:40510 [wandb_init.py:init():795] starting run threads in backend
+2025-11-05 10:16:29,616 INFO    MainThread:40510 [wandb_run.py:_console_start():2374] atexit reg
+2025-11-05 10:16:29,616 INFO    MainThread:40510 [wandb_run.py:_redirect():2229] redirect: wrap_raw
+2025-11-05 10:16:29,617 INFO    MainThread:40510 [wandb_run.py:_redirect():2294] Wrapping output streams.
+2025-11-05 10:16:29,617 INFO    MainThread:40510 [wandb_run.py:_redirect():2319] Redirects installed.
+2025-11-05 10:16:29,622 INFO    MainThread:40510 [wandb_init.py:init():838] run started, returning control to user process
+2025-11-05 10:16:30,013 INFO    MainThread:40510 [wandb_run.py:_config_callback():1376] config_cb None None {'sde': "{'T': 1.0, 'n_steps': 1000, 'gamma': 1.0, 'lambda_val': 1.0, 'c_val': 0.1, 'M': 1.0, 'beta': 8.0, 'p_init_var': 1.0, 's_init_var': 1.0}", 'model': "{'name': 'resnet', 'data_dim': 2, 'ps_dim': 4, 'input_dim': '${model.ps_dim}', 'index_dim': 1, 'hidden_dim': 128, 'n_hidden_layers': 4}", 'training': "{'lr': 0.0001, 'n_epochs': 50, 'ema_decay': 0.999, 'n_val_steps': 500, 'n_plot_samples': 500, 'val_every_n_epoch': 5, 'batch_size': 256}", 'data': "{'n_points': 5000, 'noise': 0.5}", 'wandb': "{'project': 'swissroll', 'entity': 'rajit906', 'name': 'vpsde-mlp-swissroll-run', 'log_model': True}"}

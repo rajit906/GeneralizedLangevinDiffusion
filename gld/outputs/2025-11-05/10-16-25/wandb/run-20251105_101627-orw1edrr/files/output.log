@@ -1,0 +1,21 @@
+--- Initializing GLDSDE (Data Dim: 2) ---
+Calculating stationary covariance...
+GLDSDE Initialized.
+Sanity Checking DataLoader 0: 100%|████████████████████████████████████████████████████████████████████████████████| 2/2 [00:00<00:00, 1004.38it/s]Generating 2 samples with GLD Sampler...
+  | Name  | Type   | Params
+---------------------------------
+0 | model | ResNet | 67.3 K
+---------------------------------
+67.3 K    Trainable params
+0         Non-trainable params
+67.3 K    Total params
+0.269     Total estimated model params size (MB)
+/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/site-packages/pytorch_lightning/trainer/connectors/data_connector.py:441: The 'val_dataloader' does not have many workers which may be a bottleneck. Consider increasing the value of the `num_workers` argument` to `num_workers=7` in the `DataLoader` to improve performance.
+
+
+
+
+
+GLD ODE Sampler: 100%|█████████████████████████████████████████████████████████████████████████████████████████▌| 995/1000 [00:10<00:00, 54.40it/s]
+
+/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/site-packages/pytorch_lightning/trainer/connectors/data_connector.py:436: Consider setting `persistent_workers=True` in 'train_dataloader' to speed up the dataloader worker initialization.

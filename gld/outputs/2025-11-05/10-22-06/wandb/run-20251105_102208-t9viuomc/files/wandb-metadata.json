@@ -1,0 +1,37 @@
+{
+    "os": "macOS-13.3-arm64-arm-64bit",
+    "python": "3.11.4",
+    "heartbeatAt": "2025-11-05T10:22:10.011098",
+    "startedAt": "2025-11-05T10:22:08.855615",
+    "docker": null,
+    "cuda": null,
+    "args": [],
+    "state": "running",
+    "program": "/Users/rajit906/Downloads/PhD/PhD_Research/Current/GeneralizedLangevinDiffusion/gld/train_gld.py",
+    "codePathLocal": null,
+    "codePath": "gld/train_gld.py",
+    "git": {
+        "remote": "https://github.com/rajit906/GeneralizedLangevinDiffusion.git",
+        "commit": "ecad04f4fed51eeeedcdc423a5c70f8f07c0d17f"
+    },
+    "email": "rajpal106@berkeley.edu",
+    "root": "/Users/rajit906/Downloads/PhD/PhD_Research/Current/GeneralizedLangevinDiffusion",
+    "host": "Rajits-MacBook-Air.local",
+    "username": "rajit906",
+    "executable": "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3",
+    "cpu_count": 8,
+    "cpu_count_logical": 8,
+    "disk": {
+        "/": {
+            "total": 228.27386474609375,
+            "used": 11.357704162597656
+        }
+    },
+    "gpuapple": {
+        "type": "arm",
+        "vendor": "Apple"
+    },
+    "memory": {
+        "total": 8.0
+    }
+}

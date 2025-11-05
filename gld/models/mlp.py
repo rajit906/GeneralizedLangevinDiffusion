@@ -7,11 +7,12 @@ from . import utils
 @utils.register_model(name='mlp')
 class MLP(nn.Module):
     def __init__(self,
-                 config,
-                 input_dim=2,
-                 index_dim=1,
-                 hidden_dim=128):
+                 config):
         super().__init__()
+        input_dim = config.input_dim
+        index_dim = config.index_dim
+        hidden_dim = config.hidden_dim
+
         act = nn.SiLU()
         in_dim = input_dim + index_dim
         out_dim = input_dim
@@ -35,11 +36,12 @@ class MLP(nn.Module):
 class ResNet(nn.Module):
     def __init__(self,
                  config,
-                 input_dim=2,
-                 index_dim=1,
-                 hidden_dim=64,
                  n_hidden_layers=4):
         super().__init__()
+        input_dim = config.input_dim
+        index_dim = config.index_dim
+        hidden_dim = config.hidden_dim
+        n_hidden_layers = config.n_hidden_layers
         self.act = nn.SiLU()
         self.n_hidden_layers = n_hidden_layers
         in_dim = input_dim + index_dim

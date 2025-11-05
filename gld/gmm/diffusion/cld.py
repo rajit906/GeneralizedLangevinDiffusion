@@ -1,6 +1,6 @@
 # TODO:
 # Vectorize. Remove MVN. Remove inverse.
-
+# cld.py
 import torch
 import matplotlib.pyplot as plt
 import numpy as np

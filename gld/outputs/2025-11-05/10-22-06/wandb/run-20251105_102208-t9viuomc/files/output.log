@@ -1,0 +1,87 @@
+--- Initializing GLDSDE (Data Dim: 2) ---
+Calculating stationary covariance...
+GLDSDE Initialized.
+Sanity Checking DataLoader 0: 100%|████████████████████████████████████████████████████████████████████████████████| 2/2 [00:00<00:00, 1699.13it/s]Generating 2 samples with GLD Sampler...
+  | Name  | Type   | Params
+---------------------------------
+0 | model | ResNet | 67.3 K
+---------------------------------
+67.3 K    Trainable params
+0         Non-trainable params
+67.3 K    Total params
+0.269     Total estimated model params size (MB)
+/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/site-packages/pytorch_lightning/trainer/connectors/data_connector.py:441: The 'val_dataloader' does not have many workers which may be a bottleneck. Consider increasing the value of the `num_workers` argument` to `num_workers=7` in the `DataLoader` to improve performance.
+
+
+
+
+
+GLD ODE Sampler:  99%|████████████████████████████████████████████████████████████████████████████████████████ | 989/1000 [00:10<00:00, 103.45it/s]
+
+
+
+Epoch 4: 100%|██████████████████████████████████████████| 18/18 [00:00<00:00, 30.09it/s, v_num=uomc, train_loss_step=1.680, train_loss_epoch=12.40]Generating 500 samples with GLD Sampler...
+
+
+
+
+
+
+GLD ODE Sampler:  93%|███████████████████████████████████████████████████████████████████████████████████▎      | 926/1000 [00:13<00:00, 80.64it/s]
+
+
+
+Epoch 9: 100%|███████████████████████████| 18/18 [00:00<00:00, 21.54it/s, v_num=uomc, train_loss_step=0.370, train_loss_epoch=4.790, val_mmd=0.881]Generating 500 samples with GLD Sampler...
+
+
+GLD ODE Sampler:  95%|████████████████████████████████████████████████████████████████████████████████████▉    | 954/1000 [00:06<00:00, 184.75it/s]
+
+
+
+
+
+
+Epoch 14: 100%|██████████████████████████| 18/18 [00:02<00:00,  8.47it/s, v_num=uomc, train_loss_step=12.50, train_loss_epoch=8.810, val_mmd=0.881]Generating 500 samples with GLD Sampler...
+
+
+
+GLD ODE Sampler:  97%|██████████████████████████████████████████████████████████████████████████████████████▌  | 973/1000 [00:06<00:00, 241.19it/s]
+
+
+Epoch 19: 100%|██████████████████████████| 18/18 [00:00<00:00, 26.60it/s, v_num=uomc, train_loss_step=7.240, train_loss_epoch=5.830, val_mmd=0.880]Generating 500 samples with GLD Sampler...
+GLD ODE Sampler:  53%|███████████████████████████████████████████████▎                                         | 532/1000 [00:01<00:01, 384.10it/s]
+
+
+
+Epoch 24: 100%|██████████████████████████| 18/18 [00:00<00:00, 21.46it/s, v_num=uomc, train_loss_step=5.360, train_loss_epoch=11.10, val_mmd=0.881]Generating 500 samples with GLD Sampler...
+GLD ODE Sampler:  46%|█████████████████████████████████████████                                                | 461/1000 [00:01<00:01, 343.57it/s]
+
+
+
+Epoch 29: 100%|██████████████████████████| 18/18 [00:00<00:00, 26.77it/s, v_num=uomc, train_loss_step=10.20, train_loss_epoch=8.910, val_mmd=0.880]Generating 500 samples with GLD Sampler...
+
+GLD ODE Sampler:  96%|█████████████████████████████████████████████████████████████████████████████████████▎   | 958/1000 [00:02<00:00, 391.83it/s]
+
+
+
+Epoch 34: 100%|██████████████████████████| 18/18 [00:00<00:00, 19.25it/s, v_num=uomc, train_loss_step=0.110, train_loss_epoch=6.050, val_mmd=0.880]Generating 500 samples with GLD Sampler...
+GLD ODE Sampler:  55%|████████████████████████████████████████████████▊                                        | 548/1000 [00:01<00:01, 319.27it/s]
+
+
+
+Epoch 39: 100%|██████████████████████████| 18/18 [00:00<00:00, 24.05it/s, v_num=uomc, train_loss_step=0.223, train_loss_epoch=16.60, val_mmd=0.880]Generating 500 samples with GLD Sampler...
+
+GLD ODE Sampler:  93%|███████████████████████████████████████████████████████████████████████████████████      | 933/1000 [00:02<00:00, 370.23it/s]
+
+
+
+Epoch 44: 100%|██████████████████████████| 18/18 [00:00<00:00, 26.96it/s, v_num=uomc, train_loss_step=0.280, train_loss_epoch=11.20, val_mmd=0.880]Generating 500 samples with GLD Sampler...
+GLD ODE Sampler:  40%|███████████████████████████████████▉                                                     | 404/1000 [00:01<00:01, 336.39it/s]
+
+
+
+
+Epoch 49: 100%|██████████████████████████| 18/18 [00:00<00:00, 28.04it/s, v_num=uomc, train_loss_step=5.210, train_loss_epoch=6.460, val_mmd=0.881]Generating 500 samples with GLD Sampler...
+GLD ODE Sampler:  75%|███████████████████████████████████████████████████████████████████                      | 753/1000 [00:01<00:00, 412.28it/s]
+
+`Trainer.fit` stopped: `max_epochs=50` reached.███████████████████████████████████████████████████████████████▌| 995/1000 [00:02<00:00, 374.08it/s]

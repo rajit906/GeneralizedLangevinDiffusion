@@ -19,7 +19,7 @@ class SwissRollDataModule(pl.LightningDataModule):
                                         data, [int(len(data)*0.9), len(data) - int(len(data)*0.9)])
 
     def train_dataloader(self):
-        return DataLoader(self.train_data, batch_size=self.cfg.training.batch_size, shuffle=True, num_workers=4)
+        return DataLoader(self.train_data, batch_size=self.cfg.training.batch_size, shuffle=True, num_workers=0)
         
     def val_dataloader(self):
         return DataLoader(self.val_data, batch_size=1)

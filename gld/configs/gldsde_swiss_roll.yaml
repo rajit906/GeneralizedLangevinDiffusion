@@ -1,0 +1,48 @@
+# configs/gldsde_swiss_roll.yaml
+
+# SDE Configuration for Generalized Langevin Diffusion
+sde:
+  T: 1.0
+  n_steps: 1000
+  gamma: 1.0
+  lambda_val: 1.0
+  c_val: 0.1
+  M: 1.0
+  beta: 8.0         # 8 * sqrt(M)
+  p_init_var: 1.0
+  s_init_var: 1.0
+
+# Model Configuration
+model:
+  name: 'resnet'     # We can reuse the ResNet
+  data_dim: 2        # Dimension of x (Swiss Roll)
+  ps_dim: 4          # Dimension of (p,s) = 2 * data_dim
+  
+  # --- Params for the ResNet model ---
+  # 'input_dim' for ResNet will be our 'ps_dim'
+  input_dim: ${model.ps_dim} 
+  index_dim: 1       # Time dimension
+  hidden_dim: 128
+  n_hidden_layers: 4
+
+# Training Configuration
+training:
+  lr: 1.0e-4
+  n_epochs: 50
+  ema_decay: 0.999
+  n_val_steps: 500    # Steps for reverse SDE sampler in validation
+  n_plot_samples: 500 # Number of samples to show in wandb plot
+  val_every_n_epoch: 5
+  batch_size: 256
+
+# Data Configuration
+data:
+  n_points: 5000
+  noise: 0.5
+
+# WandB Logging
+wandb:
+  project: "swissroll"
+  entity: "rajit906" # Your wandb entity (username or team)
+  name: "gld-resnet-swissroll-run"
+  log_model: True

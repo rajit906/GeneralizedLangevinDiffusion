@@ -13,7 +13,7 @@ class SinusoidalTimeEmbedding(nn.Module):
         half_dim = self.dim // 2
         freq = math.log(10000) / (half_dim - 1)
         freqs = torch.exp(torch.arange(half_dim, device=t.device) * -freq)
-        emb = t.unsqueeze(1).float() * freqs.unsqueeze(0)           # (batch, half_dim)
+        emb = t.unsqueeze(1).float() * freqs.unsqueeze(0) * 1000.           # (batch, half_dim)
         emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)   # (batch, dim)
         return emb
 
@@ -80,8 +80,8 @@ class GLDScoreNetwork(nn.Module):
             nn.Linear(hidden_dim, 2)
         )
 
-    def forward(self, ps, t_idx):
-        # ps: (B,2), t_idx: (B,)
-        t_emb = self.time_emb(t_idx.float())
+    def forward(self, ps, t):
+        # ps: (B,2), t: (B,)
+        t_emb = self.time_emb(t)
         h = torch.cat([ps, t_emb], dim=-1)
         return self.mlp(h)  # (B,2)

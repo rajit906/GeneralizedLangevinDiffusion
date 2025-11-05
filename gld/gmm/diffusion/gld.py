@@ -1,3 +1,4 @@
+# gld.py
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
@@ -123,8 +124,6 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
 
         return zs
 
-
-
     def _get_perturbed_params(self, t):
         """
         Computes the GMM parameters (weights, means, covs) for a given time t.
@@ -180,27 +179,45 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
 
     def solve_reverse_sde_em(self, zT, score_model=None):
         """
-        Solves the reverse SDE dz = [-beta*A*z - G*G^T*S']dt + G*dW_bar using Euler-Maruyama.
+        Solves the reverse-time SDE:
+            dz = [f(z,t) - G G^T s(z,t)] dt + G dW_bar,
+        integrated backward with Euler–Maruyama.
         """
-        zs = torch.zeros((zT.shape[0], self.n_steps, 3), device=DEVICE)
+        B = zT.shape[0]
+        zs = torch.zeros((B, self.n_steps, 3), device=DEVICE)
         zs[:, -1, :] = zT
         sqrt_dt = torch.sqrt(self.dt)
+
         for i in range(self.n_steps - 1, -1, -1):
             z = zs[:, i, :]
+            t_idx = i
+
+            # --- Compute score ---
             if score_model is None:
-                score_full = self._score_fn(z, i)  # (B,3)
+                score_full = self._score_fn(z, i)
             else:
-                t_idx = torch.full((z.shape[0],), i, device=DEVICE, dtype=torch.long)
-                ps = z[:, 1:]  # (B,2)
-                score_ps = score_model(ps, t_idx)  # (B,2)
-                score_full = torch.cat([torch.zeros_like(ps[:, :1]), score_ps], dim=1)  # (B,3)
+                ps = z[:, 1:]
+                t_val = self.ts[t_idx].expand(ps.shape[0])
+                score_ps = score_model(ps, t_val)
+                score_full = torch.cat(
+                    [torch.zeros_like(ps[:, :1]), score_ps], dim=1
+                )
+
+            # --- Forward drift ---
             f_fwd = -self.beta * (self.A @ z.T).T
+
+            # --- Reverse drift ---
             score_drift = (self.GGt @ score_full.T).T
-            drift_rev = -f_fwd + score_drift
+            drift_rev = f_fwd - score_drift    # ✅ Correct sign
+
+            # --- Noise term ---
             dW = torch.randn_like(z) * sqrt_dt
             diffusion = (self.G @ dW.T).T
+
+            # --- Backward integration ---
             if i > 0:
                 zs[:, i - 1, :] = z - drift_rev * self.dt + diffusion
+
         return zs
     
     def precompute_sscs(self):
@@ -253,9 +270,9 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
             if score_model is None:
                 score_old = self._score_fn(z2, t_idx)
             else:
-                t_idx_tensor = torch.full((z2.shape[0],), t_idx, device=DEVICE, dtype=torch.long)
                 ps = z2[:, 1:]
-                score_ps = score_model(ps, t_idx_tensor)
+                t_val = self.ts[t_idx].expand(ps.shape[0])
+                score_ps = score_model(ps, t_val)
                 score_old = torch.cat([torch.zeros_like(ps[:, :1]), score_ps], dim=1)
             score_drift_old = (self.GGt @ (score_old.T + z2.T)).T
             z3 = z2 + score_drift_old * self.dt
@@ -348,9 +365,9 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
             if score_model is None:
                 score_old = self._score_fn(z2, t_idx)
             else:
-                t_idx_tensor = torch.full((z2.shape[0],), t_idx, device=DEVICE, dtype=torch.long)
                 ps = z2[:, 1:]
-                score_ps = score_model(ps, t_idx_tensor)
+                t_val = self.ts[t_idx].expand(ps.shape[0])
+                score_ps = score_model(ps, t_val)
                 score_old = torch.cat([torch.zeros_like(ps[:, :1]), score_ps], dim=1)
             score_drift_old = (self.GGt @ (score_old.T + z2.T)).T
             z3 = z2 + score_drift_old * self.dt
@@ -393,9 +410,9 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
             if score_model is None:
                 score_old = self._score_fn(z2, t_idx)
             else:
-                t_idx_tensor = torch.full((z2.shape[0],), t_idx, device=DEVICE, dtype=torch.long)
                 ps = z2[:, 1:]
-                score_ps = score_model(ps, t_idx_tensor)
+                t_val = self.ts[t_idx].expand(ps.shape[0])
+                score_ps = score_model(ps, t_val)
                 score_old = torch.cat([torch.zeros_like(ps[:, :1]), score_ps], dim=1)
             score_drift_old = (self.GGt @ score_old.T).T
             z3 = z2t + score_drift_old * self.dt
@@ -439,23 +456,62 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         elif type == 'anal':
             return self.solve_forward_sde_anal(z0)
 
-    def solve_pfode(self, zT):
+    def solve_pfode(self, zT, score_model=None):
         """
-        Solves the reverse process using the Probability Flow ODE (deterministic).
-        dz = [-f_fwd(z) + 0.5 * G*G^T*S']dt
+        Solve reverse-time Probability Flow ODE:
+            dz = [ f(z,t) - 0.5 * G G^T * score(z,t) ] dt
+        where f is the forward drift (i.e. the one used in forward SDE).
+        Args:
+            zT: (B,3) terminal states at t = T
+            score_model: optional learned score network; if None use analytic _score_fn
+        Returns:
+            zs: (B, n_steps, 3) reverse-time deterministic trajectories
         """
-        zs = torch.zeros((zT.shape[0], self.n_steps, 3), device=DEVICE)
+        device = zT.device
+        B = zT.shape[0]
+        zs = torch.zeros((B, self.n_steps, 3), device=device)
         zs[:, -1, :] = zT
 
+        # Ensure GGt is a torch tensor on same device/dtype
+        if not isinstance(self.GGt, torch.Tensor):
+            GGt = torch.from_numpy(self.GGt).float().to(device)
+        else:
+            GGt = self.GGt.to(device).float()
+
+        # If your time-grid is nonuniform, compute time-steps from self.ts
+        # Otherwise self.dt is fine. Safer: compute dt_i = ts[i] - ts[i-1]
+        ts = self.ts.to(device)
+        # Precompute backward deltas: dt_back[i] = ts[i] - ts[i-1] for i>0
+        dt_back = torch.empty(self.n_steps, device=device, dtype=ts.dtype)
+        dt_back[0] = ts[0]  # not used at i=0
+        dt_back[1:] = ts[1:] - ts[:-1]
+
         for i in range(self.n_steps - 1, -1, -1):
-            z = zs[:, i, :]
-            score_full = self._score_fn(z, i)
-            f_fwd = -self.beta * (self.A @ z.T).T
-            score_drift = (self.GGt @ score_full.T).T
-            drift_ode = -f_fwd + 0.5 * score_drift
+            z = zs[:, i, :]  # (B,3)
+
+            # --- score at time index i ---
+            if score_model is None:
+                score_full = self._score_fn(z, i)  # (B,3)
+            else:
+                ps = z[:, 1:]  # (B,2)
+                t_val = ts[i].expand(B)
+                score_ps = score_model(ps, t_val)  # (B,2)
+                score_full = torch.cat([torch.zeros(B, 1, device=device), score_ps], dim=1)  # (B,3)
+
+            # --- forward drift f(z,t) used in forward SDE ---
+            f_fwd = -self.beta * (self.A.to(device) @ z.T).T  # (B,3)
+
+            # --- deterministic ODE drift: f - 0.5 * GG^T * score ---
+            score_drift = (GGt @ score_full.T).T  # (B,3)
+            drift_ode = f_fwd - 0.5 * score_drift   # CORRECT SIGN
+
+            # --- integrate backward in time by dt_back[i] (deterministic) ---
             if i > 0:
-                zs[:, i - 1, :] = z - drift_ode * self.dt
+                zs[:, i - 1, :] = z - drift_ode * dt_back[i]
+
         return zs
+
+
 
     def run_demonstration(self, n_plot, n_hist, score_model=None):
         """
@@ -503,9 +559,9 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         momentum_data = reverse_sde_paths[:, 0, 1]
         memory_data  = reverse_sde_paths[:, 0, 2]
 
-        position_filtered = position_data#[np.abs(position_data) <= 100]
-        momentum_filtered = momentum_data#[np.abs(momentum_data) <= 100]
-        memory_filtered   = memory_data#[np.abs(memory_data) <= 100]
+        position_filtered = position_data[np.abs(position_data) <= 100]
+        momentum_filtered = momentum_data[np.abs(momentum_data) <= 100]
+        memory_filtered   = memory_data[np.abs(memory_data) <= 100]
 
         # Call plotting functions without the 'color' argument to fix the TypeError
         plot_position_dist(position_filtered, self.gmm_params, axes[0, 2])
@@ -522,6 +578,70 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
         plt.tight_layout(rect=[0, 0, 1, 0.96])
         plt.show()
         return reverse_sde_paths
+    
+
+    def run_pfode_demo(self, n_plot=200, n_hist=1000, score_model=None):
+        """
+        Runs and visualizes the deterministic Probability Flow ODE (PF-ODE)
+        reverse process, mirroring the layout of run_demonstration() but without forward plots.
+        """
+        # --- Step 1: Sample terminal states (same as reverse SDE) ---
+        xT = torch.randn(n_hist, device=DEVICE)
+        pT = torch.randn(n_hist, device=DEVICE) * np.sqrt(self.M)
+        sT = torch.randn(n_hist, device=DEVICE)
+        zT = torch.stack([xT, pT, sT], dim=1)
+
+        # --- Step 2: Integrate PF-ODE backward deterministically ---
+        zs_pfode = self.solve_pfode(zT, score_model=score_model).detach().cpu().numpy()
+
+        # --- Step 3: Visualization ---
+        fig, axes = plt.subplots(3, 2, figsize=(14, 12))
+        fig.suptitle(f"{self.name}: Probability Flow ODE Demonstration", fontsize=16)
+        var_names = ['Position (x)', 'Momentum (p)', 'Memory (s)']
+        ts_cpu = self.ts.cpu().numpy()
+
+        for i in range(3):
+            # Reverse PF-ODE trajectories
+            axes[i, 0].plot(ts_cpu, zs_pfode[10:n_plot, :, i].T,
+                            lw=1.5, alpha=0.05, color='darkred')
+            axes[i, 0].plot(ts_cpu, zs_pfode[:10, :, i].T,
+                            lw=1.5, alpha=1.0, color='darkred')
+            axes[i, 0].set_title(f"Reverse PF-ODE: {var_names[i]}")
+            axes[i, 0].set_ylabel(var_names[i])
+
+            if i == 2:
+                axes[i, 0].set_xlabel("Time")
+                axes[i, 1].set_xlabel("Value")
+
+        # --- Step 4: Terminal (initial) distributions at t=0 ---
+        x0_pf = zs_pfode[:, 0, 0]
+        p0_pf = zs_pfode[:, 0, 1]
+        s0_pf = zs_pfode[:, 0, 2]
+
+        # Filter out extreme tails for cleaner histograms
+        position_filtered = x0_pf[np.abs(x0_pf) <= 100]
+        momentum_filtered = p0_pf[np.abs(p0_pf) <= 100]
+        memory_filtered   = s0_pf[np.abs(s0_pf) <= 100]
+
+        plot_position_dist(position_filtered, self.gmm_params, axes[0, 1])
+        axes[0, 1].set_title("Final Position Distribution (PF-ODE)")
+
+        plot_aux_dist(axes[1, 1], (momentum_filtered, 'Momentum'),
+                    target_dist=(0, np.sqrt(self.p_init_var)))
+        axes[1, 1].set_title("Final Momentum Distribution (PF-ODE)")
+
+        plot_aux_dist(axes[2, 1], (memory_filtered, 'Memory'),
+                    target_dist=(0, np.sqrt(self.s_init_var)))
+        axes[2, 1].set_title("Final Memory Distribution (PF-ODE)")
+
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        plt.show()
+
+        return zs_pfode
+
+
+
+
 
     def train_score_network_hsm(self, ScoreNetwork, n_epochs=50, batch_size=128, lr=1e-3, n_steps=1000):
         """
@@ -585,8 +705,9 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
 
                 # --- 8. Prediction ---
                 ps_inputs = z_t[:, 1:]  # (B,2)
-                t_idx_tensor = torch.full((batch_size,), t_idx_scalar, device=device, dtype=torch.long)
-                score_ps_pred = model(ps_inputs, t_idx_tensor)  # (B,2)
+                t_scalar = self.ts[t_idx_scalar]   # tensor scalar (already physical time)
+                t_batch = torch.full((batch_size,), t_scalar, device=device, dtype=torch.float64)
+                score_ps_pred = model(ps_inputs, t_batch)
 
                 # --- 9. Reparametrization to eps ---
                 score_full_pred = torch.cat([torch.zeros(batch_size,1,device=device), score_ps_pred], dim=1)  # (B,3)
@@ -597,16 +718,16 @@ class GeneralizedLangevinDiffusion(DiffusionModel):
 
                 # --- 10. Weighted loss with GG^T ---
                 diff = eps_hat_ps - eps_target_ps  # (B,2)
-                #per_sample_loss = torch.einsum("bi,ij,bj->b", diff, GGt_ps, diff)  # ||·||_{GG^T}^2
-                per_sample_loss = ((eps_hat_ps - eps_target_ps) ** 2).mean(dim=1) # Frobenius
+                per_sample_loss = torch.einsum("bi,ij,bj->b", diff, GGt_ps, diff)  # ||·||_{GG^T}^2
+                #per_sample_loss = ((eps_hat_ps - eps_target_ps) ** 2).mean(dim=1) # Frobenius
 
                 # Scaling factor: ||L||_{GG^T}^{-2}
                 # Norm of L wrt GG^T block
                 L_ps = L_t_batch[:,1:,1:]  # (B,2,2)
-                #L_norm_sq = torch.einsum("bij,kl,bkl->b", L_ps, GGt_ps, L_ps)  # ||·||_{GG^T}^2
-                L_norm_sq = torch.norm(L_ps, dim=(1,2))**2 + 1e-6 # Frobenius
+                L_norm_sq = torch.einsum("bij,kl,bkl->b", L_ps, GGt_ps, L_ps)  # ||·||_{GG^T}^2
+                #L_norm_sq = torch.norm(L_ps, dim=(1,2))**2 + 1e-6 # Frobenius
 
-                per_sample_loss = per_sample_loss #/ L_norm_sq
+                per_sample_loss = per_sample_loss / L_norm_sq
                 loss = per_sample_loss.mean()
 
                 optimizer.zero_grad()
