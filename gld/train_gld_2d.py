@@ -158,7 +158,7 @@ class GLDSDEModel(pl.LightningModule):
         return torch.optim.Adam(self.parameters(), lr=self.cfg.training.lr)
         
 
-@hydra.main(config_path="configs", config_name="gldsde_swiss_roll")
+@hydra.main(config_path="configs", config_name="gldsde_gmm_1d")
 def main(cfg: DictConfig):
     print(OmegaConf.to_yaml(cfg))
     

@@ -27,18 +27,18 @@ model:
 
 # Training Configuration
 training:
-  lr: 1.0e-4
-  n_epochs: 50
+  lr: 1.0e-3
+  n_epochs: 25
   ema_decay: 0.999
   n_val_steps: 500    # Steps for reverse SDE sampler in validation
   n_plot_samples: 500 # Number of samples to show in wandb plot
   val_every_n_epoch: 5
-  batch_size: 256
+  batch_size: 128
 
 # Data Configuration
 data:
   n_points: 5000
-  noise: 0.5
+  #noise: 0.5
 
 # WandB Logging
 wandb:

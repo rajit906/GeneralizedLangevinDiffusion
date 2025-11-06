@@ -3,6 +3,24 @@
 import torch
 import torch.nn as nn
 from . import utils
+import math
+
+# --- Sinusoidal Time Embedding ---
+# This class is needed by both MLP and ResNet
+class SinusoidalTimeEmbedding(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, t):
+        # t: (batch,)
+        device = t.device
+        half_dim = self.dim // 2
+        freq = math.log(10000) / (half_dim - 1)
+        freqs = torch.exp(torch.arange(half_dim, device=device) * -freq)
+        emb = t.unsqueeze(1).float() * freqs.unsqueeze(0)
+        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
+        return emb
 
 @utils.register_model(name='mlp')
 class MLP(nn.Module):
@@ -10,26 +28,42 @@ class MLP(nn.Module):
                  config):
         super().__init__()
         input_dim = config.input_dim
-        index_dim = config.index_dim
         hidden_dim = config.hidden_dim
+        self.act = nn.SiLU()
 
-        act = nn.SiLU()
-        in_dim = input_dim + index_dim
-        out_dim = input_dim
+        # --- Time Embedding ---
+        self.time_emb_dim = 64 # You can make this configurable
+        self.time_embed = nn.Sequential(
+            SinusoidalTimeEmbedding(self.time_emb_dim),
+            nn.Linear(self.time_emb_dim, self.time_emb_dim),
+            self.act
+        )
+        
+        # --- Network ---
+        in_dim = input_dim + self.time_emb_dim # Input is (ps, t_emb)
+        out_dim = input_dim # Output is score for (ps)
 
         self.main = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
-            act,
+            self.act,
             nn.Linear(hidden_dim, hidden_dim),
-            act,
+            self.act,
             nn.Linear(hidden_dim, hidden_dim),
-            act,
+            self.act,
             nn.Linear(hidden_dim, out_dim)
         )
 
     def forward(self, x, t):
-        # Concatenate x and t
-        h = torch.cat([x, t.reshape(-1, 1)], dim=1)
+        # x is ps_inputs (B, 2)
+        # t is time (B,)
+        
+        # 1. Embed time
+        time_emb = self.time_embed(t) # (B, time_emb_dim)
+        
+        # 2. Concatenate x and embedded time
+        h = torch.cat([x, time_emb], dim=1) # (B, 2 + time_emb_dim)
+        
+        # 3. Pass through network
         return self.main(h)
 
 @utils.register_model(name='resnet')
@@ -39,12 +73,20 @@ class ResNet(nn.Module):
                  n_hidden_layers=4):
         super().__init__()
         input_dim = config.input_dim
-        index_dim = config.index_dim
         hidden_dim = config.hidden_dim
         n_hidden_layers = config.n_hidden_layers
         self.act = nn.SiLU()
         self.n_hidden_layers = n_hidden_layers
-        in_dim = input_dim + index_dim
+        
+        # --- Time Embedding ---
+        self.time_emb_dim = 64 # Or add to config
+        self.time_embed = nn.Sequential(
+            SinusoidalTimeEmbedding(self.time_emb_dim),
+            nn.Linear(self.time_emb_dim, self.time_emb_dim),
+            self.act
+        )
+        
+        in_dim = input_dim + self.time_emb_dim
         out_dim = input_dim
 
         # Input layer
@@ -59,9 +101,13 @@ class ResNet(nn.Module):
         self.output_layer = nn.Linear(hidden_dim, out_dim)
 
     def forward(self, x, t):
-        # Embed time and concatenate
-        time_emb = t.reshape(-1, 1)
-        h = torch.cat([x, time_emb], dim=1)
+        # x is ps_inputs (B, 2)
+        # t is time (B,)
+        
+        # Embed time
+        time_emb = self.time_embed(t) # (B, time_emb_dim)
+        
+        h = torch.cat([x, time_emb], dim=1) # (B, 2 + time_emb_dim)
         
         # Initial projection
         h = self.act(self.input_layer(h))

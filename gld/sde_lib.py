@@ -180,6 +180,7 @@ class GLDSDE:
         # Caches for marginal_prob
         self._F_t_cache = {}
         self._L_t_cache = {}
+        self._gmm_marginal_cache = {}
 
     def get_z0(self, x0):
         """Constructs z0 = [x0, p0, s0] from data x0."""
@@ -212,6 +213,62 @@ class GLDSDE:
             self._L_t_cache[t] = torch.from_numpy(L_t_np).float().to(self.device)
             
         return self._F_t_cache[t], self._L_t_cache[t]
+    
+    def get_perturbed_gmm_params(self, t, gmm_params_dict):
+        """
+        Computes the GMM parameters (weights, means, covs) for a given time t.
+        gmm_params_dict is the 'data' block from the config.
+        """
+        t = float(t)
+        if t in self._gmm_marginal_cache:
+            return self._gmm_marginal_cache[t]
+            
+        gmm_means = gmm_params_dict['means']
+        gmm_stds = gmm_params_dict['stds']
+        gmm_weights = gmm_params_dict['weights']
+        
+        weights = torch.tensor(gmm_weights, device=self.device, dtype=torch.float32)
+        n_components = len(weights)
+        means_k = []
+        covs_k = []
+        
+        A_np = self.A_np
+        G_np = self.G_np
+        C_np = self.C_np
+        
+        for k in range(n_components):
+            # Build mu0_k_np (shape [3*data_dim])
+            mu0_x = np.array(gmm_means[k]) # (data_dim,)
+            mu0_p = np.zeros(self.data_dim)
+            mu0_s = np.zeros(self.data_dim)
+            mu0_k_np = np.concatenate([mu0_x, mu0_p, mu0_s]) # (state_dim,)
+            
+            # Build Sigma0_k_np (shape [state_dim, state_dim])
+            std_x_k = np.array(gmm_stds[k])
+            vars_x_k = std_x_k**2
+            vars_p = np.full(self.data_dim, self.p_init_var)
+            vars_s = np.full(self.data_dim, self.s_init_var)
+            
+            Sigma0_k_diag = np.concatenate([vars_x_k, vars_p, vars_s])
+            Sigma0_k_np = np.diag(Sigma0_k_diag)
+
+            # Compute marginals
+            mu_t_np, Sigma_t_np = compute_mean_and_covariance(
+                t, self.beta, A_np, G_np, mu0_k_np, Sigma0_k_np, C_np
+            )
+            
+            mu_t = torch.from_numpy(mu_t_np).float().to(self.device)
+            
+            # Add jitter before storing
+            jitter = 1e-6 * torch.eye(self.state_dim, device=self.device)
+            Sigma_t = torch.from_numpy(Sigma_t_np).float().to(self.device) + jitter
+            
+            means_k.append(mu_t)
+            covs_k.append(Sigma_t)
+            
+        # Cache and return
+        self._gmm_marginal_cache[t] = (weights, torch.stack(means_k), torch.stack(covs_k))
+        return self._gmm_marginal_cache[t]
 
     def marginal_prob(self, z0, t):
         """
